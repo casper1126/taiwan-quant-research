@@ -1,0 +1,20 @@
+# 資料庫（太大，不推）
+data/taiwan_stock.db
+data/*.db
+
+# 原始 CSV（太大）
+raw_data/
+
+# Python 環境
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# 敏感資訊
+.env
+*.env
+
+# 暫存
+logs/
+*.log
