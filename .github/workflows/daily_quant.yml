@@ -1,0 +1,95 @@
+name: Daily Quant Update
+
+on:
+  # 每個交易日 14:30 台灣時間（= UTC 06:30）自動觸發
+  schedule:
+    - cron: '30 6 * * 1-5'
+
+  # 手動觸發（測試用）
+  workflow_dispatch:
+
+jobs:
+  daily-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ── 1. 取得程式碼 ─────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 2. 設定 Python ────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ── 3. 快取 pip 套件（加速安裝）──────────────────────
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ hashFiles('requirements1.txt') }}
+          restore-keys: pip-
+
+      # ── 4. 還原 SQLite 資料庫（關鍵：用 cache 持久保存）──
+      # 每次跑完 GitHub Actions 環境會消失，
+      # 用 cache 把 DB 存起來，下次再還原
+      - name: Restore database cache
+        uses: actions/cache@v4
+        with:
+          path: data/taiwan_stock.db
+          # 用日期當 key，每天更新一個新 cache
+          key: taiwan-db-${{ github.run_id }}
+          restore-keys: |
+            taiwan-db-
+
+      # ── 5. 安裝套件 ───────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          pip install -r requirements1.txt
+          pip install requests loguru tqdm
+
+      # ── 6. 建立必要資料夾 ─────────────────────────────────
+      - name: Create directories
+        run: |
+          mkdir -p data signals logs
+
+      # ── 7. 執行每日更新 ───────────────────────────────────
+      - name: Run daily update
+        env:
+          FINMIND_TOKEN:      ${{ secrets.FINMIND_TOKEN }}
+          LINE_NOTIFY_TOKEN:  ${{ secrets.LINE_NOTIFY_TOKEN }}
+          NOTION_TOKEN:       ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: python daily_update.py
+
+      # ── 8. 把今日訊號推回 repo ────────────────────────────
+      # signals/ 資料夾的 JSON 會累積每天的紀錄
+      - name: Commit and push signals
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name  "github-actions[bot]"
+          git add signals/
+          # 如果有新檔案才 commit（避免沒有訊號時報錯）
+          git diff --staged --quiet || git commit -m "signals: $(date +%Y-%m-%d)"
+          git push
+
+      # ── 9. 失敗時發 LINE 警告 ─────────────────────────────
+      - name: Notify on failure
+        if: failure()
+        env:
+          LINE_NOTIFY_TOKEN: ${{ secrets.LINE_NOTIFY_TOKEN }}
+        run: |
+          python3 -c "
+          import os, requests
+          token = os.getenv('LINE_NOTIFY_TOKEN','')
+          if token:
+              requests.post(
+                  'https://notify-api.line.me/api/notify',
+                  headers={'Authorization': f'Bearer {token}'},
+                  data={'message': '\n⚠️ 台股量化系統\nGitHub Actions 今日更新失敗！\n請檢查 Actions 頁面'}
+              )
+          "

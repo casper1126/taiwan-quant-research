@@ -14,6 +14,10 @@ run.py
 import argparse
 import sys
 from loguru import logger
+import sys
+sys.path.insert(0, "data_pipeline")
+sys.path.insert(0, "strategy")
+sys.path.insert(0, "automation")
 
 # 日誌設定
 logger.remove()

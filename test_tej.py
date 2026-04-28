@@ -1,21 +1,3 @@
-python3 -c "
-import requests, urllib3
-urllib3.disable_warnings()
-_orig = requests.Session.request
-def _no_verify(self, method, url, **kwargs):
-    kwargs['verify'] = False
-    return _orig(self, method, url, **kwargs)
-requests.Session.request = _no_verify
-
-import tejapi
-tejapi.ApiConfig.api_base = 'https://api.tej.com.tw'
-tejapi.ApiConfig.api_key  = '你的TOKEN'
-
-# 不加日期，先確認資料存在
-df = tejapi.get('TRAIL/TAPRCD', paginate=True, coid='2330')
-print(len(df), df['mdate'].min(), df['mdate'].max())
-"
-
 import requests, urllib3
 urllib3.disable_warnings()
 _orig = requests.Session.request

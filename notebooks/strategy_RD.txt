@@ -1,0 +1,706 @@
+# 量化交易策略全景研究報告
+## 從華爾街到台北：策略、邏輯、實作與台股應用
+
+> 作者：Casper（NCCU 應數系，MFE 申請目標）
+> 撰寫目的：建立量化策略的完整知識體系，作為 MFE 申請作品集的核心研究檔案
+> 最後更新：2026 年 4 月
+
+---
+
+## 目錄
+
+**第一部分：產業全景**
+1. [量化交易的歷史脈絡](#1-量化交易的歷史脈絡)
+2. [頂尖機構的策略哲學比較](#2-頂尖機構的策略哲學比較)
+
+**第二部分：策略分類與深度解析**
+3. [因子投資（Factor Investing）](#3-因子投資factor-investing)
+4. [統計套利（Statistical Arbitrage）](#4-統計套利statistical-arbitrage)
+5. [趨勢追蹤與 CTA 策略](#5-趨勢追蹤與-cta-策略)
+6. [事件驅動策略](#6-事件驅動策略)
+7. [機器學習與另類數據策略](#7-機器學習與另類數據策略)
+8. [高頻交易與市場微結構](#8-高頻交易與市場微結構)
+
+**第三部分：台股應用研究**
+9. [台股市場結構與策略適用性](#9-台股市場結構與策略適用性)
+10. [台股因子有效性實證](#10-台股因子有效性實證)
+11. [我的策略組合設計](#11-我的策略組合設計)
+
+**第四部分：實作路徑**
+12. [策略最佳化方法](#12-策略最佳化方法)
+13. [學術論文閱讀清單](#13-學術論文閱讀清單)
+
+---
+
+# 第一部分：產業全景
+
+## 1. 量化交易的歷史脈絡
+
+### 1.1 三個世代的演進
+
+**第一代（1980–1995）：數學家進場**
+
+Jim Simons 在 1982 年創立 Renaissance Technologies，他不是金融人，是幾何學家、Stony Brook 數學系主任。他的核心洞察：「金融市場是訊號處理問題，不是經濟學問題」。這個思維把量化交易從計量經濟學的範疇，轉移到資訊理論、訊號處理、機器學習。
+
+同期 David E. Shaw（哥倫比亞電腦科學博士）創立 D.E. Shaw、Cliff Asness（芝加哥金融博士）後來創立 AQR，這群人共同建立了現代量化交易的數學基礎。
+
+**第二代（1995–2010）：因子模型與學術主導**
+
+1993 年 Fama-French 三因子模型發表，把資產定價理論落實成可投資的策略：市場、規模、價值。1997 年 Carhart 加入動能因子。2015 年 Fama-French 擴展為五因子（加入獲利能力、投資因子）。
+
+這個時期的代表是 AQR——他們不依賴神秘的數學模型，而是把學術上經過幾十年驗證的因子，用紀律性的系統化方式執行。AQR 的座右銘是「Trust the academic process」。
+
+**第三代（2010–至今）：機器學習與另類數據**
+
+Two Sigma、Citadel 全球量化（GQS）、World Quant 等機構大舉投入機器學習。重點不再是「找新因子」，而是：
+- 用深度學習建模非線性關係
+- 用衛星圖像、信用卡刷卡資料、網路爬蟲數據預測公司營收
+- 用 NLP 分析財報、新聞、社群媒體的語意
+
+Renaissance 的 Medallion Fund 自 1988 年至今，年化淨報酬約 **40%**（扣費前更高），是有史以來表現最好的量化基金。
+
+### 1.2 為什麼這個產業吸引頂尖人才
+
+| 指標 | 數據 |
+|------|------|
+| Renaissance 員工 PhD 比例 | 約 50%（150+ 研究員） |
+| AQR 員工 PhD 比例 | 約 25% |
+| Citadel GQS 起薪（PhD） | 美金 30–50 萬 |
+| Renaissance Medallion 年化報酬 | ~40%（1988–今） |
+
+關鍵差異：傳統金融是「資訊優勢」，現代量化是「資料處理速度與模型準確度的競爭」。
+
+---
+
+## 2. 頂尖機構的策略哲學比較
+
+### 2.1 五大代表機構的核心差異
+
+#### Renaissance Technologies（最神秘）
+- **方法**：訊號處理 + 機器學習，模型完全不公開
+- **持有期**：很短，從幾分鐘到幾天
+- **資料來源**：petabyte 級資料庫，包含天氣、運輸、電視排程等非傳統資料
+- **核心人才**：物理學家、數學家、密碼學家（避開傳統金融背景）
+- **Jim Simons 的話**：「我們不問為什麼有這個模式，只要它存在且可預測就好」
+
+#### AQR Capital Management（學術派）
+- **方法**：基於學術文獻的因子投資，模型公開透明
+- **持有期**：數月到數年
+- **核心因子**：價值、動能、品質、低波動、carry
+- **代表性論文**：
+  - Asness, Moskowitz, Pedersen (2013) "Value and Momentum Everywhere"
+  - Frazzini, Pedersen (2014) "Betting Against Beta"
+- **Cliff Asness 的話**：「最好的策略往往是無聊的，紀律比聰明重要」
+
+#### Two Sigma（科技派）
+- **方法**：機器學習 + 大數據 + 雲端運算
+- **持有期**：中短期
+- **特色**：把自己定位為科技公司，員工以資料科學家、工程師為主
+- **獨特做法**：眾包式競賽（如 Halite AI 競賽）招募人才
+
+#### Citadel（全策略派）
+- **方法**：多策略平行運作，每個 pod 獨立負責一類策略
+- **覆蓋**：股票多空、固定收益、商品、量化、做市
+- **特色**：嚴格的風險控制、快速淘汰不賺錢的策略
+
+#### Bridgewater（總體派，量化邊緣）
+- **方法**：全球宏觀策略，量化執行但思維是經濟學
+- **特色**：Risk Parity 風險平價策略的開創者
+- **持有期**：月到年
+
+### 2.2 學界的研究重心
+
+頂尖 MFE/PhD 研究所目前的研究方向：
+
+| 學校 | 研究重心 |
+|------|---------|
+| **MIT Sloan / LFE** | 市場微結構、HFT、機器學習應用 |
+| **Princeton ORFE** | 數理金融、隨機分析、深度學習 |
+| **CMU MSCF** | 計算金融、實作能力（C++、訊號處理） |
+| **Berkeley Haas/MFE** | 實證資產定價、行為金融 |
+| **NYU Courant MathFin** | 偏理論的數理金融、衍生性商品 |
+| **UChicago Financial Math** | 連結 Booth 商學院的學術派 |
+| **Columbia MFE** | Wall Street 連結最強，實務導向 |
+
+最新（2025–2026）的學術研究熱點：
+- LLM/Transformer 在量化的應用
+- 強化學習做投資組合管理
+- 因果推論（Causal Inference）區分相關性與因果性
+- 替代資料（衛星、信用卡、企業內部資料）
+
+---
+
+# 第二部分：策略分類與深度解析
+
+## 3. 因子投資（Factor Investing）
+
+### 3.1 核心概念
+
+**因子**：能解釋股票報酬的可量化特徵。如果某個特徵能持續預測未來報酬，就稱為「Alpha 因子」。
+
+**為什麼因子有效**？三種理論解釋：
+
+1. **風險補償（Risk Premium）**：價值股風險較高，所以長期報酬較高（理性派）
+2. **行為偏誤（Behavioral Bias）**：投資人對基本面新聞反應不足，造成動能（行為派）
+3. **市場結構**：機構投資人有交易限制，散戶有特定偏好，造成定價扭曲
+
+### 3.2 七大經典因子
+
+#### ① 價值（Value）
+**邏輯**：被市場低估的股票會回歸合理價值。
+
+**指標**：
+- P/E（本益比）：股價 / 每股盈餘
+- P/B（股價淨值比）：股價 / 每股淨值
+- P/S（股價營收比）
+- EV/EBITDA：企業價值 / 息稅折舊攤銷前利潤
+
+**核心論文**：
+- Fama, French (1992) "The Cross-Section of Expected Stock Returns"
+- Asness, Frazzini (2013) "The Devil in HML's Details"
+
+**台股實證**：你目前的 IC = 0.036，ICIR = 0.407，是三個因子中表現最好的。台股散戶多、機構少，價值溢價特別明顯。
+
+#### ② 動能（Momentum）
+**邏輯**：近期強勢的股票會繼續強勢。
+
+**標準計算**：過去 12 個月報酬，**跳過最近 1 個月**（避免短期反轉效應）。
+
+**核心論文**：
+- Jegadeesh, Titman (1993) "Returns to Buying Winners and Selling Losers"
+- Asness, Moskowitz, Pedersen (2013) "Value and Momentum Everywhere"
+
+**台股實證**：傳統研究顯示台股動能效應**較弱**，因為台股以散戶為主，反轉效應強。但用 52 週新高動能反而有效（Hou, Xue, Zhang 2020）。
+
+**重要警告**：動能會「崩盤」（Momentum Crashes），通常發生在熊市轉多頭時，因為高動能股突然變成低動能。Daniel & Moskowitz (2016) "Momentum Crashes" 是必讀論文。
+
+#### ③ 品質（Quality）
+**邏輯**：高獲利、低負債、營運穩定的公司，長期報酬較高。
+
+**指標**：
+- ROE（股東權益報酬率）
+- ROA（資產報酬率）
+- 毛利率（Gross Profit Margin）
+- 負債比率（Debt-to-Equity）
+- 盈餘穩定度（Earnings Stability）
+
+**核心論文**：
+- Asness, Frazzini, Pedersen (2019) "Quality Minus Junk"
+
+**台股實證**：高 ROE + 低負債的策略在台股長期有效，特別是科技龍頭股。
+
+#### ④ 低波動（Low Volatility）
+**邏輯**：直覺上高波動應該有高報酬，但實證**完全相反**——低波動股票長期報酬反而較高。這是金融學的「低波動異常」（Low Vol Anomaly）。
+
+**為什麼**？行為解釋：投資人偏好「樂透型」股票（高波動有可能暴漲），高估了它們，導致低波動股長期被低估。
+
+**核心論文**：
+- Frazzini, Pedersen (2014) "Betting Against Beta"
+- Baker, Bradley, Wurgler (2011) "Benchmarks as Limits to Arbitrage"
+
+**台股實證**：TEJ 研究顯示，台股的特異性波動（IVOL）有顯著的負向溢價，且效應比美股更強。
+
+#### ⑤ 規模（Size）
+**邏輯**：小型股長期報酬高於大型股。
+
+**現況**：自 1980 年代後，這個效應在美股**幾乎消失**，但在新興市場（包含台灣）仍然存在。
+
+**核心論文**：
+- Banz (1981) "The Relationship Between Return and Market Value of Common Stocks"
+- Asness et al. (2018) "Size Matters, If You Control Your Junk"
+
+**台股實證**：小型股在台股仍有溢價，但流動性差、滑價大，實際執行困難。
+
+#### ⑥ 投資（Investment）
+**邏輯**：保守投資的公司（低資本支出、低資產成長）長期報酬較高。激進擴張的公司往往做得太快導致報酬下降。
+
+**指標**：資產成長率（Asset Growth Rate）、外部融資（External Financing）
+
+**核心論文**：
+- Cooper, Gulen, Schill (2008) "Asset Growth and the Cross-Section of Stock Returns"
+
+#### ⑦ 獲利能力（Profitability）
+**邏輯**：高毛利率的公司，未來報酬較高。
+
+**指標**：Gross Profitability = 毛利 / 總資產
+
+**核心論文**：
+- Novy-Marx (2013) "The Other Side of Value: The Gross Profitability Premium"
+- Fama, French (2015) "A Five-Factor Asset Pricing Model"
+
+### 3.3 因子的衰減問題
+
+**警示**：許多曾經有效的因子，在被學術論文發表後，效果會逐漸衰減（甚至消失）。Cliff Asness 稱這為「Crowding」——當太多人交易同一個因子，溢價就消失。
+
+**McLean, Pontiff (2016) "Does Academic Research Destroy Stock Return Predictability?"** 研究了 97 個因子，發現論文發表後因子的報酬平均**衰減 32%**。
+
+**啟示**：你不能完全依賴公開因子，必須：
+1. 用多個因子組合（降低單一因子失效的風險）
+2. 持續尋找新的、未被發表的因子
+3. 監控你的因子是否仍然有效（IC 衰減監測）
+
+---
+
+## 4. 統計套利（Statistical Arbitrage）
+
+### 4.1 配對交易（Pairs Trading）
+
+**核心邏輯**：找兩檔長期同步移動的股票，當它們的價差暫時拉大時，做多落後者、做空領先者，等價差回歸時兩邊都賺。
+
+**經典案例**：可口可樂 vs 百事可樂，福特 vs 通用汽車，台積電 vs 聯發科。
+
+**數學基礎：協整（Cointegration）**
+
+兩檔股票的價格序列各自是非平穩的（隨時間漂移），但它們的線性組合卻是平穩的（圍繞均值波動），這就是協整關係。
+
+**判斷流程：**
+1. **單根檢定（ADF Test）**：確認個別序列是非平穩的
+2. **Engle-Granger 兩步法**：
+   - 對 Y 對 X 做迴歸：Y_t = α + β·X_t + ε_t
+   - 對殘差 ε_t 做 ADF 檢定，若殘差平穩 → 協整成立
+3. **計算 z-score**：z = (spread - mean) / std
+
+**交易訊號：**
+- z > 2：價差過大，做多 X、做空 Y
+- z < -2：價差過小，做多 Y、做空 X
+- |z| < 0.5：平倉
+
+**核心論文**：
+- Gatev, Goetzmann, Rouwenhorst (2006) "Pairs Trading: Performance of a Relative-Value Arbitrage Rule"
+- Avellaneda, Lee (2010) "Statistical Arbitrage in the U.S. Equities Market"
+
+### 4.2 三股以上的統計套利
+
+**主成份分析（PCA）**：把整個產業（如所有半導體股）分解成主成份，前 1–3 個主成份解釋大部分共同波動，剩下的殘差就是個股的特異性。
+
+**作法**：
+1. 對殘差做平穩性檢定
+2. 殘差過大（z > 2）的股票就是「異常」，可以建立部位
+3. 等殘差回歸均值時平倉
+
+這是 D.E. Shaw 等機構的標準做法。
+
+### 4.3 為什麼配對交易在台股難做
+
+| 限制 | 影響 |
+|------|------|
+| 放空標的有限 | 只有融券清單（約 600 檔）可以放空 |
+| 借券成本高 | 借券利率隨需求大幅波動 |
+| 漲跌停限制 | ±10% 漲跌停會中斷套利機會 |
+| 散戶比例高 | 短期價差容易被情緒打破均值回歸 |
+
+**可行做法**：在大型股、流動性高的標的中尋找配對，用較長的回歸視窗（30 天以上）。
+
+---
+
+## 5. 趨勢追蹤與 CTA 策略
+
+### 5.1 核心邏輯
+
+**CTA = Commodity Trading Advisor**，但現在 CTA 早已不限於商品，而是泛指「跨資產類別的趨勢追蹤策略」。
+
+**核心信念**：價格趨勢一旦形成，會持續一段時間。原因：
+- 機構大單的逐步建倉
+- 投資人對新資訊的反應不足
+- 市場情緒的自我強化
+
+### 5.2 經典訊號
+
+#### 雙均線（Dual Moving Average）
+- 短均線（如 50 日）穿過長均線（如 200 日）→ 黃金交叉，做多
+- 短均線跌破長均線 → 死亡交叉，做空
+
+#### 突破系統（Breakout System）
+- 價格突破過去 N 天最高點 → 做多
+- 價格跌破過去 N 天最低點 → 做空
+- 經典案例：Turtle Traders 用 20 天突破
+
+#### TSMOM（Time-Series Momentum）
+- 過去 12 個月報酬為正 → 做多；為負 → 做空
+- Moskowitz, Ooi, Pedersen (2012) "Time Series Momentum" 是 CTA 的學術根基
+
+### 5.3 為什麼 CTA 在危機時特別有用
+
+**「Crisis Alpha」**：CTA 在 2008 金融海嘯、2020 疫情都表現很好，因為它會跟著「下跌趨勢」放空，不像股票多頭策略只能虧損。
+
+這是為什麼大型機構會把 CTA 作為「投資組合保險」。
+
+**代表機構**：Man AHL、Winton Group、Aspect Capital，都是傳統 CTA 巨頭。
+
+### 5.4 台股應用
+
+**台指期 + 台股 ETF**是最直接的應用：
+- 用 50 日 / 200 日均線判斷趨勢
+- 多頭時買 0050、空頭時放空台指期或買反向 ETF（00632R）
+- 月度再平衡
+
+**個股 CTA 在台股不太適合**，因為個股趨勢容易被消息打斷。
+
+---
+
+## 6. 事件驅動策略
+
+### 6.1 併購套利（Merger Arbitrage）
+
+**邏輯**：當 A 宣布併購 B（每股 100 元），B 股價會跳到 95 元（不會直接到 100，因為怕案子破局）。買 B 賺 5% 價差。
+
+**風險**：併購案破局，B 股價暴跌。
+
+### 6.2 財報事件
+
+**Post-Earnings Announcement Drift（PEAD）**：盈餘超預期的股票，**未來幾週繼續上漲**。
+
+這是金融學最穩定的異常之一。
+
+**核心論文**：
+- Bernard, Thomas (1989) "Post-Earnings-Announcement Drift"
+
+**台股版本**：月營收公告超預期 → 未來 1 個月有顯著超額報酬。這對你來說是寶藏，因為你已經有月營收資料。
+
+### 6.3 指數調整
+
+**邏輯**：被加入主流指數（如 S&P 500、台灣 50）的股票，因為被動基金被迫買入，會有短期超額報酬。
+
+**核心論文**：
+- Shleifer (1986) "Do Demand Curves for Stocks Slope Down?"
+
+**台股版本**：FTSE 台灣 50、MSCI 台灣指數調整時，新加入的股票通常有 3–7% 的調整效應。
+
+### 6.4 季節性效應
+
+- **元月效應（January Effect）**：小型股在 1 月報酬特別高，主因是稅務結算。台股版本是 **農曆年前後的紅包行情**。
+- **週末效應**：週一報酬比週五低，但已逐漸消失。
+- **除息行情**：台股除息前的「填息行情」是台股獨有現象。
+
+---
+
+## 7. 機器學習與另類數據策略
+
+### 7.1 為什麼機器學習在量化越來越重要
+
+傳統因子模型是線性的：報酬 = α + β1·因子1 + β2·因子2 + ...
+
+但真實世界是非線性的：高 ROE 公司在多頭表現好，但在空頭可能表現差（因為投資人轉向防禦股）。線性模型抓不到這種「條件式關係」。
+
+機器學習能自動學習這些非線性、條件式、交互作用，這是它的優勢。
+
+### 7.2 主要機器學習方法
+
+#### Tree-Based 模型（XGBoost、LightGBM、CatBoost）
+- **優點**：對非線性、缺漏值、特徵尺度都不敏感
+- **缺點**：容易過擬合
+- **業界使用**：幾乎所有量化團隊都用，是「標準工具」
+
+#### LSTM / Transformer
+- **優點**：擅長處理時間序列
+- **缺點**：訓練慢、需要大量資料、解釋性差
+- **代表論文**：
+  - Gu, Kelly, Xiu (2020) "Empirical Asset Pricing via Machine Learning"
+
+#### 強化學習（RL）
+- **優點**：不只預測報酬，還直接學習「最佳交易策略」
+- **缺點**：訓練不穩定、樣本效率差
+- **業界使用**：JP Morgan、Citadel 內部研究中
+
+### 7.3 另類數據（Alternative Data）
+
+**衛星圖像**：算特斯拉工廠停車場的車數（推估產量）、零售商的停車場（推估銷售）。
+**信用卡刷卡**：搶先 1–2 個月知道公司營收。
+**社群媒體**：Twitter / Reddit 的情緒指標。
+**網路爬蟲**：電商價格、職缺公告、消費者評論。
+
+**代表機構**：Two Sigma、Cubist（Point72）、World Quant 都重金投入。
+
+**台股的另類數據機會**：
+- PTT 股票版的情緒分析
+- Mobile01 / Dcard 的產品評論
+- 上市櫃公司法人說明會逐字稿（語意分析）
+- 政府公開資料（標案、外勞人數變化）
+
+---
+
+## 8. 高頻交易與市場微結構
+
+### 8.1 為什麼這部分對你來說「先了解就好」
+
+HFT 需要：
+- 與交易所主機共址（Co-location），延遲到微秒級
+- 自己的網路專線（FPGA + 光纖）
+- 數百萬美金的硬體投資
+
+對個人投資者完全不可能參與，但你**必須了解 HFT 的存在**，因為它影響你的執行品質。
+
+### 8.2 HFT 主要策略
+
+#### 做市（Market Making）
+- 同時掛買單和賣單，賺取買賣價差（Bid-Ask Spread）
+- 代表：Citadel Securities、Virtu Financial、Jane Street
+
+#### 統計套利（HFT 版）
+- 在毫秒級捕捉跨交易所、跨產品的微小價差
+- 交易頻率：每秒數千筆
+
+#### 訂單流預測
+- 從訂單簿（Order Book）的形狀預測短期價格
+- 用機器學習辨識「大單將進場」的模式
+
+### 8.3 對你的啟示
+
+當你的策略執行時，你會跟 HFT 演算法搶單。要避免：
+- 用市價單在開盤、收盤時下單（容易被搶）
+- 用 VWAP（成交量加權平均價）演算法分批下單
+- 避開高波動時段
+
+---
+
+# 第三部分：台股應用研究
+
+## 9. 台股市場結構與策略適用性
+
+### 9.1 台股的獨特性
+
+| 特徵 | 數據 | 對策略的影響 |
+|------|------|-------------|
+| 散戶比例 | 約 50–60% | 行為偏誤多、價值/動能因子有效 |
+| 漲跌停 | ±10% | 限制高頻策略、影響配對交易 |
+| 放空限制 | 只有融券標的可空 | 限制多空策略 |
+| 月營收公告 | 每月 10 日前 | 獨有的月頻基本面資料 |
+| 三大法人 | 外資、投信、自營商 | 籌碼面公開資料豐富 |
+| 當沖比例 | 約 40% | 短期反轉效應強 |
+
+### 9.2 各類策略在台股的適用性評分
+
+| 策略類型 | 台股適用度 | 理由 |
+|---------|-----------|------|
+| 多因子（價值+品質+低波動） | ⭐⭐⭐⭐⭐ | 散戶行為偏誤造成的因子溢價特別明顯 |
+| 月營收動能 | ⭐⭐⭐⭐⭐ | 台股獨有，公開且可得 |
+| 三大法人籌碼 | ⭐⭐⭐⭐⭐ | 學術界少研究，實務有效 |
+| 配對交易 | ⭐⭐⭐ | 受限於放空標的 |
+| 趨勢追蹤（指數） | ⭐⭐⭐⭐ | 台指期適合 |
+| 趨勢追蹤（個股） | ⭐⭐ | 個股容易被消息中斷 |
+| 事件驅動（指數調整） | ⭐⭐⭐⭐ | MSCI 台灣、富時調整有顯著效應 |
+| 事件驅動（除息） | ⭐⭐⭐ | 有效但已被廣泛交易 |
+| 統計套利（PCA） | ⭐⭐⭐ | 適合科技股、金融股族群 |
+| 機器學習（個股） | ⭐⭐⭐⭐ | 資料豐富，有研究空間 |
+| 高頻交易 | ⭐ | 個人不可能執行 |
+
+---
+
+## 10. 台股因子有效性實證
+
+### 10.1 你目前測試的結果
+
+從你 Layer 2 的初步測試（2015–2026，2056 檔股票）：
+
+| 因子 | IC 均值 | ICIR | IC>0 比例 | 結論 |
+|------|--------|------|----------|------|
+| 動能（120 日，無 skip） | -0.010 | -0.090 | 49.6% | ❌ 無效 |
+| 動能（120 日，skip 21 天）| 0.008 | 0.082 | 54.9% | ⚠️ 微弱 |
+| 價值（1/PER） | 0.036 | 0.407 | 66.8% | ✅ 有效 |
+| 月營收 YoY | 0.023 | 0.371 | 65.5% | ✅ 有效 |
+
+**結論**：在台股，**價值 + 月營收**是核心，動能要做特殊處理（如 52 週新高）才有用。
+
+### 10.2 學術文獻在台股的研究結論
+
+#### Ko, Lin, Su, Chang (2014) "Value Investing and Technical Analysis in Taiwan Stock Market"
+- 在台股，價值 + 技術分析的組合績效優於單一策略
+- 移動平均線在小型股上特別有效
+
+#### Hsu, Fung, Chang (2016) "The Performance of Taiwanese Firms After Share Repurchase Announcement"
+- 台股庫藏股宣告後 6 個月有約 8% 的超額報酬
+
+#### Chen, Su, Lin, Shih (2021) "Profitability of Moving-Average Technical Analysis Over the Firm Life Cycle"
+- 移動平均線在「成熟期公司」最有效
+
+#### TEJ Factor Library 研究（2025）
+- Idiosyncratic Volatility（IVOL）在台股有顯著的**負向溢價**
+- Short Interest Ratio（SIR）作為短空篩選因子，能提升動能策略績效
+- 9 大類因子中，**品質、低波動、流動性**在台股最穩定
+
+---
+
+## 11. 我的策略組合設計
+
+### 11.1 設計原則
+
+基於上面的研究，我為台股設計的策略組合應該：
+
+1. **以價值為核心**（IC 最高）
+2. **加入品質因子**（降低價值陷阱）
+3. **加入低波動因子**（台股獨有的強效因子）
+4. **加入月營收動能**（台股獨有資料）
+5. **加入籌碼因子**（外資+投信買超）
+6. **避開高乖離率股票**（防追高）
+7. **大盤擇時**（降低系統性風險）
+
+### 11.2 提議的因子組合
+
+```
+複合因子 = 0.30 × Value      （1/PER + 1/PBR 平均）
+        + 0.25 × Quality    （ROE × 毛利率）
+        + 0.20 × Low Vol    （IVOL 倒數）
+        + 0.15 × Rev_Momentum（月營收 YoY）
+        + 0.10 × Inst_Flow  （三大法人 60 日累積買超）
+```
+
+### 11.3 投資組合構建
+
+| 元素 | 設定 |
+|------|------|
+| 持倉檔數 | 20–30 檔（分散風險，台股流動性夠） |
+| 權重 | 風險平價（Risk Parity，依個股波動度反向加權） |
+| 再平衡頻率 | 月度（21 個交易日） |
+| 大盤擇時 | 三級曝險（多/中性/空），用 0050 而非中位數 |
+| 風控 | 單檔最高 8%、單產業最高 25%、總曝險 0–100% |
+
+### 11.4 期望績效（基於文獻保守估計）
+
+| 指標 | 期望範圍 |
+|------|---------|
+| 年化報酬 | 15–25% |
+| 年化波動度 | 15–20% |
+| Sharpe Ratio | 1.0–1.5 |
+| 最大回撤 | 15–25% |
+| 月度勝率 | 55–60% |
+| 年化換手率 | 200–400% |
+
+**重要：** 不要相信任何「Sharpe > 2、年化 > 50%」的回測結果，那幾乎一定是過度擬合或有 Look-Ahead Bias。
+
+---
+
+# 第四部分：實作路徑
+
+## 12. 策略最佳化方法
+
+### 12.1 一個關鍵問題：怎麼找最佳因子權重？
+
+四個方法，由簡到複雜：
+
+#### 方法 1：等權（Equal Weight）
+所有因子權重相同（每個 1/N），最簡單，但學術上常作為基準。
+
+**優點**：穩健、不依賴過去資料
+**缺點**：忽略因子的實際有效性差異
+
+#### 方法 2：IC 加權（IC-Weighted）
+按因子的歷史 IC 大小加權。
+
+```
+weight_i = IC_i / Σ(IC_j)
+```
+
+**優點**：用資料反映因子有效性
+**缺點**：用過去資料推未來
+
+#### 方法 3：均值-變異最佳化（Mean-Variance Optimization）
+經典 Markowitz 框架，最大化夏普比率。
+
+```
+maximize  (μ' w) / sqrt(w' Σ w)
+subject to  Σ w_i = 1, w_i ≥ 0
+```
+
+**優點**：理論最佳
+**缺點**：對輸入估計極度敏感（協方差矩陣很難估準）
+
+#### 方法 4：Walk-Forward Optimization
+最關鍵的方法，避免過度擬合。
+
+```
+for each year y:
+    用 [y-5, y-1] 的資料找最佳權重
+    用 [y, y] 的資料測試這個權重
+    記錄 out-of-sample 績效
+```
+
+只有 walk-forward 出來的績效，才是「真實」的。
+
+### 12.2 投資組合最佳化
+
+| 方法 | 邏輯 | 適合場合 |
+|------|------|---------|
+| 等權 | 每檔同重 | 起步 |
+| 風險平價 | 每檔貢獻相同的波動 | 推薦 |
+| 均值變異 | 最大化 Sharpe | 學術上最佳，實務難用 |
+| Black-Litterman | 結合主觀觀點 | 機構投資 |
+| 階層式風險平價（HRP） | 用聚類處理共變異 | 最新方法 |
+
+López de Prado (2016) "Building Diversified Portfolios that Outperform Out-of-Sample" 是 HRP 的經典論文。
+
+### 12.3 實作的時間分配建議
+
+如果你暑假要完成一個完整的系統，建議：
+
+| 階段 | 時間 | 內容 |
+|------|------|------|
+| Layer 1 + 2 | 已完成 | 資料管線 + 基礎多因子回測 |
+| Layer 3 | 1 週 | Walk-Forward Validation |
+| Layer 4 | 1 週 | 加入品質、低波動、籌碼因子 |
+| Layer 5 | 1 週 | 投資組合最佳化（風險平價） |
+| Layer 6 | 1 週 | 配對交易模組（獨立） |
+| Layer 7 | 1 週 | LightGBM 因子合成 |
+| Layer 8 | 1 週 | 完整 README + 報告撰寫 |
+
+---
+
+## 13. 學術論文閱讀清單
+
+### 13.1 必讀（Top 10）
+
+1. **Fama, French (1993)** "Common Risk Factors in the Returns on Stocks and Bonds" — 三因子模型奠基之作
+2. **Jegadeesh, Titman (1993)** "Returns to Buying Winners and Selling Losers" — 動能因子的開創
+3. **Asness, Moskowitz, Pedersen (2013)** "Value and Momentum Everywhere" — 證明因子在全球市場都有效
+4. **Frazzini, Pedersen (2014)** "Betting Against Beta" — 低波動異常的解釋
+5. **Asness, Frazzini, Pedersen (2019)** "Quality Minus Junk" — 品質因子的權威定義
+6. **Gu, Kelly, Xiu (2020)** "Empirical Asset Pricing via Machine Learning" — ML 在因子投資的標準
+7. **Gatev, Goetzmann, Rouwenhorst (2006)** "Pairs Trading" — 配對交易的學術基礎
+8. **Moskowitz, Ooi, Pedersen (2012)** "Time Series Momentum" — CTA 的學術根基
+9. **Daniel, Moskowitz (2016)** "Momentum Crashes" — 動能崩盤的警示
+10. **López de Prado (2016)** "Building Diversified Portfolios that Outperform Out-of-Sample" — HRP
+
+### 13.2 進階（深入研究時讀）
+
+- **Harvey, Liu, Zhu (2016)** "...and the Cross-Section of Expected Returns" — 因子膨脹問題（300+ 因子的批判）
+- **McLean, Pontiff (2016)** "Does Academic Research Destroy Stock Return Predictability?" — 因子衰減
+- **Avellaneda, Lee (2010)** "Statistical Arbitrage in the U.S. Equities Market" — PCA 統計套利
+- **Bali, Cakici, Whitelaw (2011)** "Maxing Out: Stocks as Lotteries" — 樂透型股票的低報酬
+- **Frazzini, Israel, Moskowitz (2018)** "Trading Costs" — 真實交易成本的估算
+
+### 13.3 台股 / 亞洲市場（你必看）
+
+- **Ko, Lin, Su, Chang (2014)** "Value Investing and Technical Analysis in Taiwan Stock Market"
+- **Chen, Su, Lin, Shih (2021)** "Profitability of Moving-Average Technical Analysis Over the Firm Life Cycle: Evidence from Taiwan"
+- **Hsu, Fung, Chang (2016)** "The Performance of Taiwanese Firms After a Share Repurchase Announcement"
+- **TEJ Factor Library 系列研究**（2024–2025）
+
+---
+
+## 結語
+
+量化交易的本質不是「用複雜的數學賺錢」，而是「用紀律性的方法，把已驗證的市場規律變成可重複執行的策略」。
+
+最聰明的人（Renaissance、Two Sigma）和最有紀律的人（AQR）走了不同的路，都成功了。對你來說，**先把 AQR 的路走穩**——基於學術文獻的因子投資，加上嚴謹的回測驗證——比追求 Renaissance 的神秘 ML 模型更實在。
+
+有了這個基礎，將來進入 MFE 後再學深度學習、強化學習，會事半功倍。
+
+---
+
+## 附錄：本報告引用之機構與其策略簡表
+
+| 機構 | 創辦人/領袖 | 核心方法 | AUM（約） |
+|------|-----------|---------|----------|
+| Renaissance Technologies | Jim Simons | ML + 訊號處理 | $110B |
+| AQR Capital | Cliff Asness | 學術派因子投資 | $135B |
+| Two Sigma | Siegel & Overdeck | ML + 大數據 | $60B |
+| Citadel | Ken Griffin | 多策略平台 | $63B |
+| D.E. Shaw | David Shaw | 計算金融 + ML | $70B |
+| Bridgewater | Ray Dalio | 全球宏觀 | $123B |
+| Millennium | Izzy Englander | Pod-based 多策略 | $70B |
+| WorldQuant | Igor Tulchinsky | 因子工廠 + 另類數據 | $9B |
+
+這些機構都是頂尖 MFE 畢業生的目標雇主，了解它們的差異對你的職涯規劃很重要。
+
+---
+
+*報告完成。下一步：把上述因子（品質、低波動、籌碼）實作到你的 quant_layer2.py，並開始 Walk-Forward Validation。*
