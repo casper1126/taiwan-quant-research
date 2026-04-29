@@ -323,11 +323,41 @@ def build_market_score(proxy: pd.Series) -> pd.Series:
     return score / 4.0
 
 
+def risk_parity_weights(returns: pd.DataFrame, holdings: list) -> dict:
+    """
+    計算風險平價權重：每支股票對組合總風險的貢獻相同。
+
+    用過去 60 天日報酬的波動度（std）倒數作為權重，
+    再正規化使總和 = 1。低波動股票獲得較大部位。
+
+    Parameters
+    ----------
+    returns  : 日報酬寬格式矩陣（index=date, columns=stock_id）
+    holdings : 當期持股清單
+
+    Returns
+    -------
+    dict: {stock_id: weight}，weights sum to 1.0
+    """
+    if not holdings:
+        return {}
+    vols = returns[holdings].iloc[-60:].std().replace(0, np.nan)
+    vols = vols.dropna()
+    if vols.empty:
+        # fallback: equal weight
+        return {s: 1.0 / len(holdings) for s in holdings}
+    inv_vol = 1.0 / vols
+    normed  = inv_vol / inv_vol.sum()
+    result  = {s: float(normed.get(s, 1.0 / len(holdings))) for s in holdings}
+    return result
+
+
 def build_positions(factors: dict,
                     top_n: int = TOP_N,
                     rebal_freq: int = REBAL_FREQ,
                     bias_cap: float = 0.10,
-                    buffer_multiplier: float = 1.5) -> pd.DataFrame:
+                    buffer_multiplier: float = 1.5,
+                    use_risk_parity: bool = False) -> pd.DataFrame:
     """
     根據因子決定每天的持倉比例矩陣。
 
@@ -402,22 +432,20 @@ def build_positions(factors: dict,
     # ── 緩衝區設定 ────────────────────────────────────────────
     exit_threshold = int(top_n * buffer_multiplier)
 
-    # ── 大盤擇時：空頭時持現金（不換股）────────────────────────
+    # ── 大盤擇時：空頭時停止買入（不改變現有持倉權重）──────────
     #
-    # 之前的問題：exposure = timing × 0.5 + 0.5
-    #   空頭時每檔從 3.33% → 1.67%，全部 30 檔都有微幅變動
-    #   position.diff() 把這些變動都算成換手，每次擇時切換貢獻 50% 換手
+    # 舊版問題：空頭時把所有持倉從 1/top_n → 0.5/top_n，
+    #   position.diff() 偵測到 top_n 支股票同時改變，
+    #   每次擇時切換貢獻 ~50% 換手，嚴重拖累績效。
     #
-    # 修正：改用「縮減持倉到 0（持現金）」而不是縮小比例
-    #   空頭時：不換股，直接把總曝險降到 50%
-    #   做法：等權重從 1/30 降到 1/60，不改變持股
-    #   這樣 position.diff() = 0，不產生換手
+    # 修正：永遠使用固定等權 1/top_n，用「行為」控制風險：
+    #   多頭 → 正常再平衡（買入新股、賣出落後股）
+    #   空頭 → 只賣出跌出緩衝區的股票，不買入任何新股
+    #   → position.diff() 僅來自實際換股，消除擇時切換造成的換手噪音
     #
-    # 注意：仍然只在再平衡日更新擇時訊號
-    avg_price_p = close.mean()
-    top_n_proxy = max(int(len(avg_price_p) * 0.20), 10)
-    large_caps  = avg_price_p.nlargest(top_n_proxy).index
-    proxy       = close[large_caps].mean(axis=1).ffill()
+    # 代理指數：用 liquid_mask 宇宙的中位數（修正 look-ahead bias）
+    #   舊版 close.mean() 用整段時間均值選成分股 = 偷看未來。
+    proxy = close.where(liquid_mask, np.nan).median(axis=1).ffill()
 
     in_market = (proxy > proxy.rolling(60).mean()).astype(float)
 
@@ -425,40 +453,46 @@ def build_positions(factors: dict,
     timing_on_rebal.iloc[rebal_idx] = in_market.iloc[rebal_idx].values
     timing_stepped = timing_on_rebal.ffill().fillna(1.0)
 
-    # 關鍵修正：在再平衡日建立部位時就把擇時考慮進去
-    # 多頭 → weight = 1/30，空頭 → weight = 1/60
-    # 這樣 pos_filled 在整個持倉期間都是固定的，不會每天變動
-    bull_weight = 1.0 / top_n
-    bear_weight = 0.5 / top_n
+    daily_ret = close.pct_change()   # 風險平價用
+    eq_weight = 1.0 / top_n          # 等權 fallback
 
-    # 重新用擇時後的權重建立部位矩陣
     current_holds_timed: set = set()
     pos_timed = pd.DataFrame(0.0, index=close.index, columns=cols)
 
     for day_idx in rebal_idx:
         today        = close.index[day_idx]
         is_bull      = timing_stepped.loc[today] >= 0.5
-        w            = bull_weight if is_bull else bear_weight
         scores_today = masked_composite.loc[today]
         rank_today   = scores_today.rank(ascending=False)
 
+        # 無論多空，跌出緩衝區就賣（風險控制永遠執行）
         to_sell = {s for s in current_holds_timed
                    if pd.isna(rank_today.get(s, np.nan))
                    or rank_today[s] > exit_threshold}
         current_holds_timed -= to_sell
 
-        entry_candidates = set(rank_today[rank_today <= top_n].index.tolist())
-        to_buy = entry_candidates - current_holds_timed
-        current_holds_timed |= to_buy
+        if is_bull:
+            # 多頭才買入新股
+            entry_candidates = set(rank_today[rank_today <= top_n].index.tolist())
+            to_buy = entry_candidates - current_holds_timed
+            current_holds_timed |= to_buy
 
-        if len(current_holds_timed) > top_n:
-            ranked = sorted(
-                [(s, rank_today.get(s, 9999)) for s in current_holds_timed],
-                key=lambda x: x[1]
-            )
-            current_holds_timed = {s for s, _ in ranked[:top_n]}
+            if len(current_holds_timed) > top_n:
+                ranked = sorted(
+                    [(s, rank_today.get(s, 9999)) for s in current_holds_timed],
+                    key=lambda x: x[1]
+                )
+                current_holds_timed = {s for s, _ in ranked[:top_n]}
 
-        pos_timed.loc[today, list(current_holds_timed)] = w
+        if current_holds_timed:
+            holds_list = list(current_holds_timed)
+            if use_risk_parity:
+                ret_slice = daily_ret.loc[:today]
+                w_dict = risk_parity_weights(ret_slice, holds_list)
+                for s, w in w_dict.items():
+                    pos_timed.loc[today, s] = w
+            else:
+                pos_timed.loc[today, holds_list] = eq_weight
 
     anchor_t = pd.DataFrame(np.nan, index=close.index, columns=cols)
     anchor_t.iloc[rebal_idx] = pos_timed.iloc[rebal_idx].values

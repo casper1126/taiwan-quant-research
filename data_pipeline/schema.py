@@ -138,6 +138,17 @@ TABLE_DDL = {
             loaded_at   TEXT DEFAULT (datetime('now','localtime')),
             PRIMARY KEY (stock_id, dataset)
         )""",
+
+    "institutional_investors": """
+        CREATE TABLE IF NOT EXISTS institutional_investors (
+            date          TEXT NOT NULL,
+            stock_id      TEXT NOT NULL,
+            investor_type TEXT NOT NULL,
+            buy           REAL,
+            sell          REAL,
+            net           REAL,
+            PRIMARY KEY (date, stock_id, investor_type)
+        )""",
 }
 
 TABLE_INDEXES = [
@@ -145,4 +156,6 @@ TABLE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_price_date ON daily_price(date)",
     "CREATE INDEX IF NOT EXISTS idx_val_sid    ON daily_valuation(stock_id)",
     "CREATE INDEX IF NOT EXISTS idx_rev_sid    ON monthly_revenue(stock_id)",
+    "CREATE INDEX IF NOT EXISTS idx_inst_sid   ON institutional_investors(stock_id)",
+    "CREATE INDEX IF NOT EXISTS idx_inst_date  ON institutional_investors(date)",
 ]
