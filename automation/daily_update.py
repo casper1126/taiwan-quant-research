@@ -38,8 +38,10 @@ from data_pipeline.download_institutional import download_all as download_instit
 from notifier import notify_all
 
 # ── 設定 ──────────────────────────────────────────────────────
-DB_PATH        = "data/taiwan_stock.db"
-SIGNALS_DIR    = Path("signals")
+# 使用絕對路徑以避免相對路徑問題（無論從哪個目錄執行都能找到）
+BASE_DIR       = Path(__file__).parent.parent  # 項目根目錄
+DB_PATH        = str(BASE_DIR / "data" / "taiwan_stock.db")
+SIGNALS_DIR    = BASE_DIR / "signals"
 FINMIND_URL    = "https://api.finmindtrade.com/api/v4/data"
 FINMIND_TOKEN  = os.getenv("eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiY2FzcGVyaHNpYW8iLCJlbWFpbCI6ImNhc3BlcmhzaWFvMjZAZ21haWwuY29tIn0.tqP_VGSZGt3G-7wUc3Suu40rcvwC3p3tGdE6kGMx0LM", "")
 
