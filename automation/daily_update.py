@@ -27,15 +27,21 @@ import pandas as pd
 from pandas.tseries.offsets import DateOffset
 from loguru import logger
 
-# ── 從同資料夾引入其他模組 ─────────────────────────────────────
-from loader import CSVLoader
+# ── 設定 Python 路徑 ──────────────────────────────────────────
+import sys
+sys.path.insert(0, str(Path(__file__).parent / ".."))  # 加入 Quant_Trading_System 根目錄
+sys.path.insert(0, str(Path(__file__).parent.parent / "data_pipeline"))
+
+# ── 引入同資料夾和 data_pipeline 的模組 ──────────────────────
+from data_pipeline.loader import CSVLoader
+from data_pipeline.download_institutional import download_all as download_institutional_all
 from notifier import notify_all
 
 # ── 設定 ──────────────────────────────────────────────────────
 DB_PATH        = "data/taiwan_stock.db"
 SIGNALS_DIR    = Path("signals")
 FINMIND_URL    = "https://api.finmindtrade.com/api/v4/data"
-FINMIND_TOKEN  = os.getenv("FINMIND_TOKEN", "")
+FINMIND_TOKEN  = os.getenv("eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiY2FzcGVyaHNpYW8iLCJlbWFpbCI6ImNhc3BlcmhzaWFvMjZAZ21haWwuY29tIn0.tqP_VGSZGt3G-7wUc3Suu40rcvwC3p3tGdE6kGMx0LM", "")
 
 # 策略參數（與 quant_layer2.py 保持一致）
 LOOKBACK   = 120
@@ -187,6 +193,32 @@ def incremental_update():
 
     logger.info(f"增量更新完成：成功 {success}，失敗 {fail}")
     return True
+
+
+def incremental_institutional_update():
+    """
+    增量下載籌碼資料（三大法人）。
+
+    利用已建立的檢查點機制，只抓 DB 還沒有的新日期資料。
+    自動應用 RateLimiter 確保不超過 FinMind 的 600 次/小時配額。
+    """
+    if not FINMIND_TOKEN:
+        logger.warning("未設定 FINMIND_TOKEN，跳過籌碼資料下載")
+        return False
+
+    try:
+        logger.info("  開始增量下載籌碼資料...")
+        download_institutional_all(
+            db_path=DB_PATH,
+            token=FINMIND_TOKEN,
+            force=False,  # 增量模式：只抓新日期
+            workers=1,     # 日間更新用 1 worker 即可（夜間可改 4）
+        )
+        logger.info("  籌碼資料更新完成")
+        return True
+    except Exception as e:
+        logger.warning(f"  籌碼資料下載失敗：{e}（非致命，繼續執行）")
+        return True  # 不中止流程
 
 
 # ══════════════════════════════════════════════════════════════
@@ -381,11 +413,15 @@ if __name__ == "__main__":
     logger.info(f"{'='*50}")
 
     # Step 1：增量更新資料
-    logger.info("\n📥 Step 1：增量更新資料庫...")
+    logger.info("\n📥 Step 1a：增量更新價格 & 估值資料...")
     ok = incremental_update()
     if not ok:
         logger.error("資料更新失敗，終止流程")
         exit(1)
+
+    # Step 1b：增量下載籌碼資料
+    logger.info("\n📊 Step 1b：增量下載籌碼資料（三大法人）...")
+    incremental_institutional_update()  # 失敗不中止
 
     # Step 2：計算今日訊號
     logger.info("\n🧠 Step 2：計算今日持倉訊號...")

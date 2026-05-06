@@ -1,0 +1,83 @@
+{
+  "folds": [
+    {
+      "year": 2017,
+      "annual_return": 17.54,
+      "annual_vol": 9.3,
+      "sharpe": 1.775,
+      "max_drawdown": -5.11,
+      "avg_exposure": 95.8
+    },
+    {
+      "year": 2018,
+      "annual_return": -4.95,
+      "annual_vol": 9.86,
+      "sharpe": -0.664,
+      "max_drawdown": -8.37,
+      "avg_exposure": 71.4
+    },
+    {
+      "year": 2019,
+      "annual_return": 3.13,
+      "annual_vol": 5.19,
+      "sharpe": 0.34,
+      "max_drawdown": -5.92,
+      "avg_exposure": 62.4
+    },
+    {
+      "year": 2020,
+      "annual_return": -6.46,
+      "annual_vol": 18.02,
+      "sharpe": -0.452,
+      "max_drawdown": -26.56,
+      "avg_exposure": 82.0
+    },
+    {
+      "year": 2021,
+      "annual_return": 20.59,
+      "annual_vol": 15.84,
+      "sharpe": 1.252,
+      "max_drawdown": -14.23,
+      "avg_exposure": 90.5
+    },
+    {
+      "year": 2022,
+      "annual_return": -6.12,
+      "annual_vol": 7.11,
+      "sharpe": -1.093,
+      "max_drawdown": -9.75,
+      "avg_exposure": 46.1
+    },
+    {
+      "year": 2023,
+      "annual_return": 15.36,
+      "annual_vol": 8.28,
+      "sharpe": 1.783,
+      "max_drawdown": -7.71,
+      "avg_exposure": 76.4
+    },
+    {
+      "year": 2024,
+      "annual_return": 5.05,
+      "annual_vol": 16.31,
+      "sharpe": 0.231,
+      "max_drawdown": -16.1,
+      "avg_exposure": 83.8
+    },
+    {
+      "year": 2025,
+      "annual_return": 8.59,
+      "annual_vol": 11.05,
+      "sharpe": 0.672,
+      "max_drawdown": -9.29,
+      "avg_exposure": 70.3
+    }
+  ],
+  "overall": {
+    "cagr": 5.41,
+    "annual_vol": 11.99,
+    "sharpe": 0.389,
+    "max_drawdown": -28.99,
+    "n_years": 8.99
+  }
+}

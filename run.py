@@ -46,11 +46,16 @@ def step1_load(csv_dir: str = "raw_data", overwrite: bool = False) -> None:
 # ── Step 1b：下載三大法人資料 ──────────────────────────────────
 def step1b_institutional(start: str = "2015-01-01",
                           force: bool = False,
-                          sid: str = None) -> None:
+                          sid: str = None,
+                          workers: int = 1) -> None:
     """
     從 FinMind 增量下載三大法人買賣超資料。
 
     需要先執行 Step 1 建立股票清單，並設定環境變數 FINMIND_TOKEN。
+    
+    Parameters
+    ----------
+    workers : 並行下載數（預設 1）。建議 2–4 以平衡速度與 API 限制。
     """
     from download_institutional import download_all
     token = os.getenv("FINMIND_TOKEN", "")
@@ -64,6 +69,7 @@ def step1b_institutional(start: str = "2015-01-01",
         start      = start,
         force      = force,
         sid_filter = sid,
+        workers    = workers,
     )
 
 
@@ -130,6 +136,7 @@ if __name__ == "__main__":
     parser.add_argument("--start",     default="2015-01-01", help="法人資料起始日")
     parser.add_argument("--force",     action="store_true",  help="強制重新下載法人資料")
     parser.add_argument("--sid",       type=str,  help="只下載指定股票的法人資料")
+    parser.add_argument("--workers",   type=int, default=1, help="並行下載數（預設 1）")
     parser.add_argument("--stats",     action="store_true",  help="查看資料庫統計")
     parser.add_argument("--verify",    type=str,  help="驗證單一股票，如 --verify 2330")
     args = parser.parse_args()
@@ -141,7 +148,7 @@ if __name__ == "__main__":
     elif args.step == "1":
         step1_load(args.dir, args.overwrite)
     elif args.step == "1b":
-        step1b_institutional(args.start, args.force, args.sid)
+        step1b_institutional(args.start, args.force, args.sid, args.workers)
     elif args.step == "2":
         step2_backtest()
     elif args.step == "3":

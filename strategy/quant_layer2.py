@@ -177,6 +177,7 @@ def build_factors(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     close  = data["close"].replace(0.0, np.nan)
     volume = data["volume"].replace(0.0, np.nan)
     PER    = data["PER"]
+    div_yld_raw = data.get("div_yld", pd.DataFrame())
 
     # ── 投資宇宙：日均成交金額前 300 ─────────────────────────
     # dollar_volume = 成交量（張）× 收盤價 × 1000（每張 1000 股）
@@ -191,6 +192,9 @@ def build_factors(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     # ① 52 週新高動能
     high_252     = close.rolling(252, min_periods=60).max()
     momentum_52w = (close_liquid / high_252).where(liquid_mask, np.nan)
+
+    # 補充：120 日（約 6 個月）報酬動能（增加短中期動能訊號）
+    mom_120 = close_liquid.pct_change(120)
 
     # ② 價值因子：1/PER
     value = (1.0 / PER_liquid).replace([np.inf, -np.inf], np.nan)
@@ -233,12 +237,20 @@ def build_factors(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     # ── 乖離率（過濾條件用，不直接排名）────────────────────
     bias = (close - close.rolling(20).mean()) / close.rolling(20).mean()
 
+    # 股息殖利率作為輔助價值/品質因子
+    div_yld = div_yld_raw.where(liquid_mask, np.nan) if not div_yld_raw.empty else pd.DataFrame(
+        np.nan, index=close.index, columns=close.columns
+    )
+
     return {
         "momentum":     momentum_52w,
+        "mom_120":      mom_120,
         "value":        value,
         "rev_yoy":      rev_yoy,
         "low_vol":      low_vol,
         "inst_flow":    inst_flow,    # 新增籌碼因子
+        "div_yld":      div_yld,
+        "dollar_volume": dollar_volume,
         "bias":         bias,
         "PER":          PER_liquid,
         "close":        close,
@@ -357,7 +369,9 @@ def build_positions(factors: dict,
                     rebal_freq: int = REBAL_FREQ,
                     bias_cap: float = 0.10,
                     buffer_multiplier: float = 1.5,
-                    use_risk_parity: bool = False) -> pd.DataFrame:
+                    use_risk_parity: bool = False,
+                    inertia: float = 0.6,
+                    max_pct_dv: Optional[float] = None) -> pd.DataFrame:
     """
     根據因子決定每天的持倉比例矩陣。
 
@@ -389,12 +403,17 @@ def build_positions(factors: dict,
     value      = factors["value"].reindex(columns=cols)
     low_vol    = factors["low_vol"].reindex(columns=cols)
     inst_flow   = factors["inst_flow"].reindex(columns=cols)
+    mom_120     = factors.get("mom_120", pd.DataFrame(np.nan, index=close.index, columns=cols)).reindex(columns=cols)
+    div_yld     = factors.get("div_yld", pd.DataFrame(np.nan, index=close.index, columns=cols)).reindex(columns=cols)
+    dollar_volume = factors.get("dollar_volume", pd.DataFrame(np.nan, index=close.index, columns=cols)).reindex(columns=cols)
     liquid_mask = factors.get("liquid_mask",
                   pd.DataFrame(True, index=close.index, columns=cols)
                   ).reindex(columns=cols)
 
     # ── 篩選條件 ──────────────────────────────────────────────
-    valid = (PER > 0) & (bias < bias_cap) & liquid_mask
+    # 注意：不要在宇宙階段硬性排除 PER<=0（註解中說明過），
+    #       否則會喪失 value 因子的深度樣本。改為只用流動性與乖離作為過濾。
+    valid = (bias < bias_cap) & liquid_mask
 
     # ── 合成因子（IC 加權，含籌碼）──────────────────────────
     #
@@ -417,13 +436,69 @@ def build_positions(factors: dict,
         std  = m.std(axis=1).replace(0, np.nan)
         return m.sub(mean, axis=0).div(std, axis=0).clip(-3, 3).fillna(0)
 
-    composite = (
-        cross_zscore(momentum)  * 0.15
-      + cross_zscore(value)     * 0.20
-      + cross_zscore(rev_yoy)   * 0.20
-      + cross_zscore(low_vol)   * 0.15
-      + cross_zscore(inst_flow) * 0.30
-    )
+    # 使用歷史 IC 做動態因子權重：
+    # 1) 對每個因子計算 IC 時序（IC = 因子排名 vs 未來 20 日報酬的 Spearman）
+    # 2) 對 IC 取絕對值再用 252 日滾動平均作穩定度量
+    # 3) 權重按各因子滾動平均 |IC| 比重分配；若資料不足則退回預設權重
+    fwd_ret = close.pct_change(20).shift(-20)
+
+    factor_map = {
+        "momentum": momentum,
+        "mom_120": mom_120,
+        "value": value,
+        "rev_yoy": rev_yoy,
+        "low_vol": low_vol,
+        "inst_flow": inst_flow,
+        "div_yld": div_yld,
+    }
+
+    # 移除未載入或全為 NaN 的因子（例如 inst_flow 尚未下載）
+    active_factors = [k for k, df in factor_map.items() if k in factor_map and not df.isna().all().all()]
+
+    # 計算每個因子的 IC 序列（歷史）
+    ic_df = pd.DataFrame(index=close.index, columns=active_factors, dtype=float)
+    for name in active_factors:
+        ic_series = compute_ic(factor_map[name], fwd_ret)
+        if not ic_series.empty:
+            ic_df.loc[ic_series.index, name] = ic_series.values
+
+    # 用 252 日滾動平均的絕對 IC 作為穩定性指標
+    ic_rolling = ic_df.abs().rolling(252, min_periods=60).mean()
+
+    # 當日權重 = 該日每因子 ic_rolling / 該日所有因子 ic_rolling 之和
+    weights_df = ic_rolling.div(ic_rolling.sum(axis=1), axis=0)
+
+    # 若某日所有因子 ic_rolling 為 0/NaN，fallback 回預設權重並排除不存在的因子
+    default_weights = {
+        "momentum": 0.14,
+        "mom_120": 0.06,
+        "value": 0.18,
+        "rev_yoy": 0.18,
+        "low_vol": 0.14,
+        "inst_flow": 0.24,
+        "div_yld": 0.06,
+    }
+    # 只保留 active 因子的預設權重並正規化
+    active_default = {k: default_weights[k] for k in active_factors}
+    total_def = sum(active_default.values())
+    for k in active_default:
+        active_default[k] = active_default[k] / total_def
+
+    missing_mask = weights_df.sum(axis=1).isna() | (weights_df.sum(axis=1) == 0)
+    if missing_mask.any():
+        for dt in weights_df.index[missing_mask]:
+            for name, w in active_default.items():
+                weights_df.at[dt, name] = w
+
+    # 計算每個因子的 cross-sectional zscore
+    cz = {name: cross_zscore(factor_map[name]) for name in active_factors}
+
+    # 合成分數（動態權重）：對每個因子，把當日權重乘上該日的 zscore
+    composite = pd.DataFrame(0.0, index=close.index, columns=close.columns)
+    for name in active_factors:
+        w_series = weights_df[name].fillna(0.0)
+        composite = composite.add(cz[name].multiply(w_series, axis=0), fill_value=0.0)
+
     masked_composite = composite.where(valid, np.nan)
 
     # ── 再平衡日索引 ──────────────────────────────────────────
@@ -458,6 +533,8 @@ def build_positions(factors: dict,
 
     current_holds_timed: set = set()
     pos_timed = pd.DataFrame(0.0, index=close.index, columns=cols)
+    # 用於再平衡間的權重平滑（降低一次性大幅換手）
+    last_rebal_pos = pd.Series(0.0, index=cols)
 
     for day_idx in rebal_idx:
         today        = close.index[day_idx]
@@ -470,6 +547,9 @@ def build_positions(factors: dict,
                    if pd.isna(rank_today.get(s, np.nan))
                    or rank_today[s] > exit_threshold}
         current_holds_timed -= to_sell
+        # 對已被賣出的股票，立即把上一期持倉權重清為 0（避免 inertia 導致殘留小倉）
+        if to_sell:
+            last_rebal_pos.loc[list(to_sell)] = 0.0
 
         if is_bull:
             # 多頭才買入新股
@@ -486,13 +566,47 @@ def build_positions(factors: dict,
 
         if current_holds_timed:
             holds_list = list(current_holds_timed)
+            # 目標權重向量（未經平滑）
+            target_pos = pd.Series(0.0, index=cols)
             if use_risk_parity:
                 ret_slice = daily_ret.loc[:today]
                 w_dict = risk_parity_weights(ret_slice, holds_list)
                 for s, w in w_dict.items():
-                    pos_timed.loc[today, s] = w
+                    target_pos[s] = w
             else:
-                pos_timed.loc[today, holds_list] = eq_weight
+                target_pos[holds_list] = eq_weight
+
+            # 權重平滑：new = inertia*prev + (1-inertia)*target
+            new_pos = last_rebal_pos * float(inertia) + target_pos * (1.0 - float(inertia))
+
+            # 若設定了 max_pct_dv，套用每次 rebalance 的可執行量限制
+            # 模擬方式：對每個標的，允許的最大權重變動 = max_pct_dv * (DV_s / DV_total)
+            # 其中 DV_s = 該標的當日 dollar_volume，DV_total = 全宇宙當日 dollar_volume 之和。
+            # 我們對每支股票各自限制當日權重變動；未能執行的部分會保留為 "現金"（即不做額外 renormalize），
+            # 這模擬了流動性不足導致部分下單未能完成的情況。
+            if max_pct_dv is not None and dollar_volume is not None and not dollar_volume.empty:
+                dv_today = dollar_volume.loc[today].fillna(0.0)
+                dv_total = dv_today.sum()
+                if dv_total <= 0:
+                    allowed = pd.Series(np.inf, index=cols)
+                else:
+                    allowed = (float(max_pct_dv) * dv_today / dv_total).reindex(cols).fillna(0.0)
+
+                trade = new_pos - last_rebal_pos
+                clipped = trade.copy()
+                # clip absolute trade by allowed per-stock change
+                clipped_vals = np.minimum(trade.abs(), allowed)
+                clipped = np.sign(trade) * clipped_vals
+                executed_pos = last_rebal_pos + clipped
+                # 不做 renormalize；未執行部分保留為現金（sum(executed_pos) <= 1）
+                pos_timed.loc[today] = executed_pos.values
+                last_rebal_pos = executed_pos
+            else:
+                # 無流動性限制，照原本邏輯執行並正規化
+                if new_pos.sum() > 0:
+                    new_pos = new_pos / new_pos.sum()
+                pos_timed.loc[today] = new_pos.values
+                last_rebal_pos = new_pos
 
     anchor_t = pd.DataFrame(np.nan, index=close.index, columns=cols)
     anchor_t.iloc[rebal_idx] = pos_timed.iloc[rebal_idx].values
@@ -576,6 +690,65 @@ def run_backtest(close: pd.DataFrame,
     return stats, equity
 
 
+def run_backtest_detailed(close: pd.DataFrame,
+                                                    position: pd.DataFrame,
+                                                    commission: float = COMMISSION,
+                                                    tax: float = TAX,
+                                                    slippage: float = SLIPPAGE) -> Tuple[dict, pd.Series, dict]:
+        """
+        Same as `run_backtest` but also returns detailed time series for analysis.
+
+        Returns: (stats, equity, diagnostics)
+            diagnostics: { 'gross_ret': Series, 'net_ret': Series, 'turnover': Series, 'total_cost': Series }
+        """
+        # 每日報酬矩陣
+        asset_ret = close.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+        # 投資組合每日毛報酬
+        gross_ret = (position * asset_ret).sum(axis=1)
+
+        # 交易成本（每日）
+        turnover = position.diff().abs().sum(axis=1)
+        cost_per_unit_buy = commission + slippage
+        cost_per_unit_sell = commission + tax + slippage
+        total_cost = turnover * (cost_per_unit_buy + cost_per_unit_sell) / 2.0
+
+        net_ret = gross_ret - total_cost
+
+        # 淨值曲線（從 1.0 開始）
+        equity = (1 + net_ret).cumprod()
+
+        # 績效指標
+        total_ret = equity.iloc[-1] - 1
+        n_days = max((net_ret != 0).sum(), 1)
+        annual_ret = (1 + total_ret) ** (252 / n_days) - 1
+        annual_vol = net_ret.std() * np.sqrt(252)
+        sharpe = (annual_ret - RF_RATE) / annual_vol if annual_vol > 0 else 0.0
+        mdd = (equity / equity.cummax() - 1).min()
+        calmar = annual_ret / abs(mdd) if mdd != 0 else 0.0
+        annual_turnover = turnover.mean() * 252 * 2
+
+        stats = {
+                "回測區間":     f"{equity.index[0].date()} ~ {equity.index[-1].date()}",
+                "總報酬":        f"{total_ret*100:.1f}%",
+                "年化報酬":      f"{annual_ret*100:.1f}%",
+                "年化波動度":    f"{annual_vol*100:.1f}%",
+                "Sharpe Ratio": f"{sharpe:.2f}",
+                "最大回撤":      f"{mdd*100:.1f}%",
+                "Calmar Ratio": f"{calmar:.2f}",
+                "年化換手率":    f"{annual_turnover:.1%}",
+        }
+
+        diagnostics = {
+                "gross_ret": gross_ret,
+                "net_ret": net_ret,
+                "turnover": turnover,
+                "total_cost": total_cost,
+        }
+
+        return stats, equity, diagnostics
+
+
 # ══════════════════════════════════════════════════════════════
 # PART 5  主程式
 # ══════════════════════════════════════════════════════════════
@@ -611,6 +784,70 @@ def save_equity(equity: pd.Series, path: str = "reports/equity_curve.csv"):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     equity.to_frame("equity").to_csv(path)
     print(f"  💾 淨值曲線已儲存：{path}")
+
+
+def run_pipeline(top_n: Optional[int] = None,
+                 rebal_freq: Optional[int] = None,
+                 bias_cap: Optional[float] = None,
+                 buffer_multiplier: Optional[float] = None,
+                 use_risk_parity: Optional[bool] = None,
+                 inertia: Optional[float] = None,
+                 max_pct_dv: Optional[float] = None,
+                 commission: Optional[float] = None,
+                 tax: Optional[float] = None,
+                 slippage: Optional[float] = None,
+                 save_equity_path: Optional[str] = None) -> Tuple[dict, pd.Series, pd.DataFrame]:
+    """
+    Run the full pipeline with optional parameter overrides.
+
+    Returns: (stats_dict, equity_series, positions_df)
+    """
+    # defaults
+    top_n = TOP_N if top_n is None else top_n
+    rebal_freq = REBAL_FREQ if rebal_freq is None else rebal_freq
+    bias_cap = 0.10 if bias_cap is None else bias_cap
+    buffer_multiplier = 1.5 if buffer_multiplier is None else buffer_multiplier
+    use_risk_parity = False if use_risk_parity is None else use_risk_parity
+    inertia = 0.6 if inertia is None else inertia
+    commission = COMMISSION if commission is None else commission
+    tax = TAX if tax is None else tax
+    slippage = SLIPPAGE if slippage is None else slippage
+
+    # Step 1：載入資料
+    data = load_matrices(DB_PATH, START_DATE, END_DATE)
+    if data["close"].shape[1] < 5:
+        raise RuntimeError("資料庫裡的股票不足 5 檔，無法做有意義的橫截面排名。")
+
+    # Step 2：建構因子
+    print("\n🧠 建構因子矩陣...")
+    factors = build_factors(data)
+
+    # Step 3：因子診斷
+    print_factor_diagnostics(factors, data["close"])
+
+    # Step 4：建構部位（帶參數覆寫）
+    print("📐 建構投資組合部位...")
+    positions = build_positions(
+        factors,
+        top_n=top_n,
+        rebal_freq=rebal_freq,
+        bias_cap=bias_cap,
+        buffer_multiplier=buffer_multiplier,
+        use_risk_parity=use_risk_parity,
+        inertia=inertia,
+        max_pct_dv=max_pct_dv,
+    )
+
+    # Step 5：回測
+    stats, equity = run_backtest(data["close"], positions,
+                                commission=commission, tax=tax, slippage=slippage)
+
+    # Step 6：輸出
+    print_report(stats)
+    if save_equity_path:
+        save_equity(equity, save_equity_path)
+
+    return stats, equity, positions
 
 
 if __name__ == "__main__":
