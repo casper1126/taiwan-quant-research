@@ -64,16 +64,24 @@ RP_EQ_BLEND   = 0.5            # D: 風險平價 0.5 + 等權 0.5（降防禦偏
 #   v2: 移除 quality，redistribute → value 0.40 / low_vol 0.25 / rev_mom 0.25 / inst 0.10
 #   v3: 暫移除 inst_flow → 結果反而更差（CAGR -1.5% → -2.6%）
 #       原因：籌碼資料其實已下載完成（19M 筆，2015-2026），inst_flow 是有效訊號
-#   v4: 還原 inst_flow（資料其實是有的）
-#   v5 (current): 加入 mom_52w（52 週新高動能，George-Hwang 2004）
-#                 預期 IC 0.03+，補上 L2 賺錢的關鍵訊號
-#   P0-2 TODO: 修擇時 proxy（用等權報酬累積指數，非 median price）
+#   v4: 還原 inst_flow
+#   v5: 加入 mom_52w
+#   v6 (current, N1): Sharpe-proportional weighting
+#       Pairing analyzer 顯示單因子 Sharpe：
+#         mom_52w   0.561  ← 主力 50%
+#         inst_flow 0.422  ← 二把手 35%
+#         value     0.117  ← 陪襯 10%
+#         rev_mom   0.034  ← 5%
+#         low_vol  -0.561  ← 砍掉（過去害我們 -3.4% 的元兇）
+#   v7 (current, N1+sweep): 純 2 因子（純化 mom + inst）
+#       Sweep 確認 value/rev_mom 在 5%/10% 權重下其實是雜訊，砍光更乾淨
+#       60/40 是 Sharpe 最大化點
 FACTOR_WEIGHTS: Dict[str, float] = {
-    "value":     0.30,   # 0.40 → 0.30：核心因子
-    "mom_52w":   0.20,   # NEW：52 週新高動能（George-Hwang 2004）
-    "low_vol":   0.20,   # 0.25 → 0.20
-    "rev_mom":   0.20,   # 0.25 → 0.20
-    "inst_flow": 0.10,
+    "mom_52w":   0.60,   # ↑ 0.50 → 0.60（純化）
+    "inst_flow": 0.40,   # ↑ 0.35 → 0.40
+    # "value":     0.0,  # 砍（5%/10% 試了反而拖累）
+    # "rev_mom":   0.0,
+    # "low_vol":   0.0,  # 砍（單因子 CAGR -3.4%）
 }
 
 # 風險平價邊界
@@ -233,6 +241,24 @@ def build_factors(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     dv_rank       = dollar_volume.rank(axis=1, ascending=False)
     liquid_mask   = dv_rank <= 300
 
+    # ── 漲跌停過濾（交易現實性）───────────────────────────────
+    # 台股漲跌停 ±10%。容忍 0.5% 數值誤差，閾值用 9.5%。
+    # 漲停（買不到）/ 跌停（賣不掉）的當日不能 enter/exit。
+    daily_ret_raw   = close.pct_change()
+    LIMIT_THRESHOLD = 0.095
+    limit_up_mask   = daily_ret_raw >= LIMIT_THRESHOLD     # 當日漲停
+    limit_down_mask = daily_ret_raw <= -LIMIT_THRESHOLD    # 當日跌停
+    not_at_limit    = ~(limit_up_mask | limit_down_mask)
+
+    # ── 處置股 hook（DB 沒有此資料，先預留介面）──────────────
+    # 未來：sanction_mask = pd.read_sql("SELECT date, stock_id FROM sanction_stocks ...")
+    # 目前：全 True（不過濾）
+    sanction_mask = pd.DataFrame(True, index=close.index, columns=close.columns)
+
+    # 合併所有 mask（注意：漲跌停只在「rebal 當日」過濾，不影響因子計算）
+    # 因此 liquid_mask 維持原本的流動性定義；trading_mask 是「交易日的可交易性」
+    trading_mask = liquid_mask & not_at_limit & sanction_mask
+
     close_liq = close.where(liquid_mask, np.nan)
     PER_liq   = PER.where(liquid_mask & (PER > 0), np.nan)
     PBR_liq   = PBR.where(liquid_mask & (PBR > 0), np.nan)
@@ -277,6 +303,7 @@ def build_factors(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
         "mom_52w":      mom_52w,
         "dollar_volume": dollar_volume,
         "liquid_mask":  liquid_mask,
+        "trading_mask": trading_mask,   # 含漲跌停 + 處置股過濾
         "close":        close,
     }
 
@@ -541,7 +568,8 @@ def build_ml_composite(factors: Dict[str, pd.DataFrame],
                         n_estimators: int = 100,
                         max_depth: int = 3,
                         min_child_samples: int = 500,
-                        target_type: str = "rank") -> pd.DataFrame:
+                        target_type: str = "rank",
+                        extra_features: dict = None) -> pd.DataFrame:
     """
     用 LightGBM 預測 forward return（C-1，已馴服版 v2）。
 
@@ -578,10 +606,10 @@ def build_ml_composite(factors: Dict[str, pd.DataFrame],
     else:  # "demean"
         target_mat = fwd_ret.sub(fwd_ret.mean(axis=1), axis=0)
 
-    # ── 預先建構 5 個 feature 矩陣（10 日平滑 + 產業中性化）─
-    feature_names = ["value", "mom_52w", "low_vol", "rev_mom", "inst_flow"]
+    # ── 預先建構 feature 矩陣（10 日平滑 + 產業中性化）─────
+    base_names = ["value", "mom_52w", "low_vol", "rev_mom", "inst_flow"]
     feature_dfs: Dict[str, pd.DataFrame] = {}
-    for name in feature_names:
+    for name in base_names:
         if name in factors and not factors[name].isna().all().all():
             smoothed = factors[name].rolling(
                 SMOOTH_WINDOW,
@@ -590,11 +618,18 @@ def build_ml_composite(factors: Dict[str, pd.DataFrame],
             zs = _industry_neutral_zscore(smoothed).fillna(0.0)
             feature_dfs[name] = zs
 
+    # 加入額外 features（O2 ablation 測試用）
+    if extra_features:
+        for name, df in extra_features.items():
+            feature_dfs[name] = df
+
     if len(feature_dfs) < 2:
         print("  ⚠️  ML 模式：可用因子不足，回退到線性合成")
         return build_composite(factors)
 
     active_feature_names = list(feature_dfs.keys())
+    if extra_features:
+        print(f"  🧪 ablation：base 5 + extras {list(extra_features.keys())}")
 
     # ── Walk-forward training & prediction ────────────────
     predictions = pd.DataFrame(np.nan, index=close.index, columns=close.columns)
@@ -938,9 +973,11 @@ def build_positions(factors: Dict[str, pd.DataFrame],
       個股權重（風險平價）保持不變，只改變總曝險比例。
       shift(1) 確保今日信號明日執行，防止未來偏差。
     """
-    close       = factors["close"]
-    liquid_mask = factors["liquid_mask"]
-    cols        = close.columns
+    close        = factors["close"]
+    liquid_mask  = factors["liquid_mask"]
+    # trading_mask 含漲跌停 + 處置股過濾（rebal 當日不交易此類）
+    trading_mask = factors.get("trading_mask", liquid_mask)
+    cols         = close.columns
 
     market_s  = market_timing_score(close, liquid_mask)
     daily_ret = close.pct_change()
@@ -955,10 +992,20 @@ def build_positions(factors: Dict[str, pd.DataFrame],
         scores    = composite.loc[today]
         rank_today = scores.rank(ascending=False)
 
-        # ── 無條件：跌出緩衝區就賣 ─────────────────────────────
+        # ── 漲跌停 / 處置股當天不可交易 ─────────────────────────
+        # 取得當日可交易股票集合
+        if today in trading_mask.index:
+            tradable_today = set(trading_mask.loc[today][trading_mask.loc[today]].index)
+        else:
+            tradable_today = set(cols)
+
+        # ── 無條件：跌出緩衝區就賣（但跌停日除外，否則賣不掉）───
+        # 已持有的股票若今日跌停 → 強制留倉（無法執行賣單）
         current_holds -= {
             s for s in current_holds
-            if pd.isna(rank_today.get(s, np.nan)) or rank_today.get(s, np.nan) > exit_thresh
+            if (pd.isna(rank_today.get(s, np.nan))
+                or rank_today.get(s, np.nan) > exit_thresh)
+            and s in tradable_today          # 跌停的股票本期保留（無法賣）
         }
 
         # ── 四級曝險（保留 30% 底倉，避免完全踏空）────────────────
@@ -973,8 +1020,10 @@ def build_positions(factors: Dict[str, pd.DataFrame],
             exposure = 0.3
 
         # ── 買入新股（含產業 count cap：每產業最多 6 檔）──────────
+        # 漲停的股票今天買不到 → 從候選名單剔除
         if exposure > 0:
-            entry_cands = set(select_with_industry_cap(rank_today, top_n=top_n))
+            tradable_rank = rank_today[rank_today.index.isin(tradable_today)]
+            entry_cands = set(select_with_industry_cap(tradable_rank, top_n=top_n))
             current_holds |= (entry_cands - current_holds)
             # 已持有的也要套用產業 count cap，避免歷史上 6 檔金融疊加
             if len(current_holds) > top_n:

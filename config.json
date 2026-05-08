@@ -1,0 +1,6 @@
+{
+  "threshold": 0.06,
+  "notification_channel_id": "1501770618293715067",
+  "account_value": 5000000,
+  "strategy": "N1 v2 ML (mom_52w 60% + inst_flow 40%)"
+}

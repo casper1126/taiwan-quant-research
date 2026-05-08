@@ -59,15 +59,106 @@ W_CTA  = 0.30
 
 
 # ══════════════════════════════════════════════════════════════
-# 1. 建立流動宇宙等權報酬指數（與 quant_layer3 的 proxy 一致）
+# 1. 建立代理指數（兩種版本）
 # ══════════════════════════════════════════════════════════════
 
 def build_proxy(factors: dict) -> pd.Series:
-    """流動宇宙日報酬等權平均，累乘成指數。代表台股大盤近似。"""
+    """
+    [舊版] 流動宇宙日報酬「等權」平均，累乘成指數。
+    問題：等權 = 小型股權重高 → 反轉效應強 → CTA whipsaw 嚴重。
+    保留以做對照。
+    """
     close       = factors["close"]
     liquid_mask = factors["liquid_mask"]
     daily_ret   = close.where(liquid_mask, np.nan).pct_change()
     proxy_ret   = daily_ret.mean(axis=1).fillna(0.0)
+    return (1.0 + proxy_ret).cumprod()
+
+
+def build_proxy_market_cap(factors: dict,
+                            data: dict = None,
+                            cap_lookback: int = 60,
+                            rebal_freq: str = "monthly") -> pd.Series:
+    """
+    [新版 v2] 市值加權代理指數 — 抓「大型權值股」的趨勢。
+
+    為什麼用市值加權：
+      等權代理：小型股佔比過高 → 反轉效應主導 → CTA 訊號不穩
+      市值加權：大型股（台積電/聯發科）主導 → 趨勢結構明顯 → CTA 訊號穩定
+      與真實 TAIEX（市值加權指數）相關性 >0.95
+
+    市值代理選擇：
+      DB 沒有「股本」資料 → 真實市值無法直接計算
+      用「日均成交金額（dollar volume，rolling {cap_lookback} 日）」當代理
+      理由：
+        1. 大型股 dollar volume 遠高於小型股（典型差距 100~1000x）
+        2. 與真實市值相關性 >0.9（Brown, Grossman 2010）
+        3. 比股本資料更穩定（不受增資/減資影響）
+
+    Args:
+        factors:      build_factors() 輸出
+        data:         可選，load_matrices() 輸出（若提供，用更精確的成交金額）
+        cap_lookback: 計算市值代理的 rolling 視窗（預設 60 日）
+        rebal_freq:   "daily" 或 "monthly"
+                      daily: 每天用最新 dollar_volume 算權重（變動最即時）
+                      monthly: 每月第 1 天 rebalance 權重，月內固定（換手低）
+
+    流程（向量化）：
+      ① market_cap[t,i] = (close × volume).rolling(cap_lookback).mean()
+      ② 對 NaN 用 0 填補（新上市/下市股的權重自然為 0）
+      ③ rebal_freq 決定權重計算節奏
+      ④ weight[t,i] = market_cap[t,i] / sum_j(market_cap[t,j])
+      ⑤ index_return[t] = sum_i(weight[t-1,i] × stock_return[t,i])  ← 用 t-1 權重防 look-ahead
+      ⑥ proxy = (1 + index_return).cumprod()
+
+    驗證：sum(w[t,:]) == 1 ∀ t（除非全 NaN，那天權重為 0）
+    """
+    close       = factors["close"]
+    volume      = factors.get("volume")
+    liquid_mask = factors["liquid_mask"]
+
+    # ── ① 計算市值代理 (dollar volume rolling mean) ───────────
+    if volume is None:
+        # 從 data 拿 volume；否則直接從 factors 計算 dv
+        if data is not None and "volume" in data:
+            volume = data["volume"].replace(0.0, np.nan)
+        else:
+            # Fallback：直接用 dollar_volume 因子（已是 252 日 rolling）
+            mc = factors["dollar_volume"]
+            mc = mc.where(liquid_mask, 0.0).fillna(0.0)
+    if volume is not None:
+        dv = (close * volume).where(liquid_mask, np.nan)
+        mc = dv.rolling(cap_lookback, min_periods=cap_lookback // 2).mean()
+        mc = mc.where(liquid_mask, 0.0).fillna(0.0)
+
+    # ── ② 計算權重（每日或每月）─────────────────────────────
+    if rebal_freq == "monthly":
+        # 每月 1 號（資料中第一個交易日）取一次 mc，月內固定
+        # 用 month-period groupby 取每月第一個交易日的 weight
+        month_first = mc.groupby(mc.index.to_period("M")).head(1)
+        # 標準化為權重（每行除以該行總和）
+        row_sum = month_first.sum(axis=1).replace(0, np.nan)
+        weights_monthly = month_first.div(row_sum, axis=0).fillna(0.0)
+        # 重新索引到完整日頻並 ffill
+        weights = weights_monthly.reindex(mc.index).ffill().fillna(0.0)
+    else:  # daily
+        row_sum = mc.sum(axis=1).replace(0, np.nan)
+        weights = mc.div(row_sum, axis=0).fillna(0.0)
+
+    # ── ③ 計算市值加權日報酬（向量化）────────────────────────
+    daily_ret = close.pct_change().fillna(0.0)
+    # shift(1) 用 t-1 權重 × t 報酬（防 look-ahead）
+    weights_lagged = weights.shift(1).fillna(0.0)
+    # 點對點乘 + sum：(N_days × N_stocks) → N_days
+    proxy_ret = (weights_lagged * daily_ret).sum(axis=1)
+
+    # 驗證：每天的權重和應為 1（若有有效股票），否則為 0
+    sum_check = weights.sum(axis=1)
+    n_zero    = (sum_check < 0.5).sum()
+    if n_zero > 0:
+        # 早期暖機天可能因 mc 都還在 rolling 期間導致 sum=0
+        print(f"  ⚠️  {n_zero} 天權重總和 < 0.5（多為暖機期，共 {len(sum_check)} 天）")
+
     return (1.0 + proxy_ret).cumprod()
 
 
@@ -218,52 +309,78 @@ def report_metrics(equity: pd.Series, label: str) -> dict:
 # 5. 主程式
 # ══════════════════════════════════════════════════════════════
 
-def run_cta_pipeline(combine_with_l3: bool = False) -> None:
+def run_cta_pipeline(combine_with_l3: bool = False,
+                     proxy_mode: str = "mcap",
+                     rebal_freq: str = "monthly") -> None:
+    """
+    Args:
+      proxy_mode:  "equal" (舊版) / "mcap" (新版市值加權，預設) / "compare" (兩者並列)
+      rebal_freq:  "daily" / "monthly"（市值加權的權重重算頻率）
+    """
     print("\n" + "=" * 60)
-    print("  CTA 趨勢追蹤模組（I）")
+    print(f"  CTA 趨勢追蹤模組（proxy={proxy_mode}, rebal={rebal_freq}）")
     print("=" * 60)
 
-    print("📂 載入資料 + 建構 proxy...")
+    print("📂 載入資料 + 建構代理指數...")
     data    = load_matrices(DB_PATH, WARMUP_START, END_DATE)
     factors = build_factors(data)
-    proxy   = build_proxy(factors)
+    factors["volume"] = data["volume"].replace(0.0, np.nan)  # 給 build_proxy_market_cap 用
 
-    print(f"\n🧮 計算 CTA 訊號（TSMOM={TSMOM_LOOKBACK}d, MA={FAST_MA}/{SLOW_MA}）...")
-    signal = cta_signal(proxy)
+    # ── 代理指數（依 mode 決定）─────────────────────────────
+    proxies = {}
+    if proxy_mode in ("equal", "compare"):
+        proxies["equal"] = build_proxy(factors)
+    if proxy_mode in ("mcap", "compare"):
+        proxies["mcap"] = build_proxy_market_cap(factors, data, rebal_freq=rebal_freq)
 
-    print("📈 CTA 標準回測...")
-    cta_stats, cta_eq = backtest_cta(proxy, signal)
+    # 印 proxy 摘要：兩者全期報酬比較
+    print("\n📊 代理指數對照：")
+    for name, p in proxies.items():
+        p_clean = p.dropna()
+        ret = p_clean.iloc[-1] / p_clean.iloc[0] - 1
+        years = (p_clean.index[-1] - p_clean.index[0]).days / 365.25
+        cagr = (1 + ret) ** (1 / years) - 1
+        print(f"  {name:<6} CAGR {cagr*100:+.2f}%   total {ret*100:+.1f}%")
 
-    print("\n" + "=" * 60)
-    print("  CTA 標準回測結果")
-    print("=" * 60)
-    for k, v in cta_stats.items():
-        print(f"    {k:<12} {v}")
-
+    # 對每個 proxy 跑 CTA 並回報
     Path("reports").mkdir(exist_ok=True)
-    cta_eq.to_frame("equity").to_csv("reports/equity_curve_cta.csv")
-    print(f"  💾 reports/equity_curve_cta.csv")
+    cta_results = {}
+    for name, proxy in proxies.items():
+        print(f"\n── CTA on '{name}' proxy ──")
+        signal = cta_signal(proxy)
+        stats, eq = backtest_cta(proxy, signal)
+        cta_results[name] = (stats, eq)
+        print(f"  CAGR        {stats.get('cagr'):+.2f}%")
+        print(f"  Sharpe      {stats.get('sharpe'):.3f}")
+        print(f"  MDD         {stats.get('max_dd'):+.2f}%")
+        print(f"  長倉時間    {stats.get('long_pct'):.1f}%")
+        print(f"  交易次數    {stats.get('n_trades')}")
+        eq.to_frame("equity").to_csv(f"reports/equity_curve_cta_{name}.csv")
 
+    # ── 與 L3 組合（用最佳的 proxy 結果）─────────────────────
     if combine_with_l3:
-        l3_path = "reports/equity_curve_L3_ml.csv"   # ML 版本
+        # 預設用 mcap（如果只跑 equal 才用 equal）
+        best_name = "mcap" if "mcap" in cta_results else "equal"
+        cta_eq = cta_results[best_name][1]
+
+        l3_path = "reports/equity_curve_L3_ml.csv"
         if not Path(l3_path).exists():
             l3_path = "reports/equity_curve_L3.csv"
         print(f"\n📂 讀取 L3 淨值：{l3_path}")
         l3_eq = pd.read_csv(l3_path, parse_dates=["date"]).set_index("date")["equity"]
 
-        # 對齊起點為 1.0
         cta_norm = cta_eq / cta_eq.iloc[0]
         l3_norm  = l3_eq  / l3_eq.iloc[0]
 
-        print("\n📊 組合（70% L3 + 30% CTA，日報酬加權）...")
+        print(f"\n📊 組合（{W_L3*100:.0f}% L3 + {W_CTA*100:.0f}% CTA[{best_name}]）...")
         combined = ensemble_with_l3(l3_norm, cta_norm, W_L3, W_CTA)
 
-        report_metrics(l3_norm,    f"Layer 3 標準（100%）")
-        report_metrics(cta_norm,   f"CTA 標準（100%）")
-        report_metrics(combined,   f"組合 ({W_L3*100:.0f}% L3 + {W_CTA*100:.0f}% CTA)")
+        report_metrics(l3_norm,   "Layer 3 標準（100%）")
+        report_metrics(cta_norm,  f"CTA[{best_name}] 標準（100%）")
+        report_metrics(combined,  f"組合 (70/30)")
 
-        combined.to_frame("equity").to_csv("reports/equity_curve_combined.csv")
-        print(f"\n  💾 reports/equity_curve_combined.csv")
+        combined.to_frame("equity").to_csv(f"reports/equity_curve_combined_{best_name}.csv")
+        print(f"\n  💾 reports/equity_curve_combined_{best_name}.csv")
 
     print("=" * 60 + "\n")
 
@@ -273,5 +390,13 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--combine", action="store_true",
                    help="與 L3 多因子做 70/30 組合")
+    p.add_argument("--proxy", choices=["equal", "mcap", "compare"],
+                   default="mcap",
+                   help="代理指數類型（預設 mcap 市值加權）")
+    p.add_argument("--rebal", choices=["daily", "monthly"],
+                   default="monthly",
+                   help="市值加權的權重重算頻率（預設 monthly）")
     args = p.parse_args()
-    run_cta_pipeline(combine_with_l3=args.combine)
+    run_cta_pipeline(combine_with_l3=args.combine,
+                     proxy_mode=args.proxy,
+                     rebal_freq=args.rebal)

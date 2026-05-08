@@ -1,0 +1,9 @@
+﻿strategy,cagr_before,cagr_after,cagr_delta,sharpe_before,sharpe_after,sharpe_delta,mdd_before,mdd_after,mdd_improvement,vol_before,vol_after,category,recommendation
+L3_low_vol,-3.39,-1.42,1.97,-0.561,-0.484,0.077,-40.12,-24.88,15.24,8.72,6.04,BEST_DEFENSIVE,🏆 最佳防禦互補 — Sharpe ↑ 且 MDD ↓，風險調整後報酬大幅改善
+L3_inst_flow,7.73,7.31,-0.42,0.422,0.497,0.075,-38.83,-25.73,13.1,14.75,11.67,BEST_DEFENSIVE,🏆 最佳防禦互補 — Sharpe ↑ 且 MDD ↓，風險調整後報酬大幅改善
+L3_ML_Ensemble,5.39,4.59,-0.8,0.331,0.345,0.014,-30.98,-23.65,7.32,11.73,8.95,RISK_CONTROL,🛡️ 純風控搭配 — MDD 改善但 Sharpe 變化不大（適合保守投資）
+L3_rev_mom,2.1,1.67,-0.43,0.034,0.013,-0.021,-49.06,-36.0,13.06,17.55,12.93,RISK_CONTROL,🛡️ 純風控搭配 — MDD 改善但 Sharpe 變化不大（適合保守投資）
+L3_value,3.01,2.01,-0.99,0.117,0.055,-0.061,-37.88,-29.25,8.63,12.93,9.3,RISK_CONTROL,🛡️ 純風控搭配 — MDD 改善但 Sharpe 變化不大（適合保守投資）
+L3_mom_52w,9.99,7.91,-2.08,0.561,0.538,-0.023,-30.04,-20.54,9.5,15.14,11.91,NEUTRAL,➖ 中性 — 疊加 CTA 對該策略無顯著影響
+PEAD,10.58,6.37,-4.21,0.359,0.3,-0.059,-46.04,-45.93,0.11,25.28,16.22,CONFLICT,⚠️ 趨勢衝突 — Sharpe 顯著下降，CTA 與該策略時序不合，不建議搭配
+Pure_ML,0.2,-0.86,-1.05,-0.084,-0.338,-0.254,-42.7,-23.52,19.18,15.53,6.97,CONFLICT,⚠️ 趨勢衝突 — Sharpe 顯著下降，CTA 與該策略時序不合，不建議搭配

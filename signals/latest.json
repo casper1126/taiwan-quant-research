@@ -1,0 +1,520 @@
+{
+  "generated_at": "2026-05-08T11:48:58.133464",
+  "rebalance_date": "2026-04-17",
+  "strategy": "N1 v2 ML (mom_52w 60% + inst_flow 40%)",
+  "account_value": 5000000.0,
+  "exposure": 1.0,
+  "n_holdings": 25,
+  "industry": {
+    "電子中上游": 0.2468,
+    "電子下游": 0.2325,
+    "電子零組件": 0.2272,
+    "傳產": 0.1175,
+    "觀光食品": 0.1081,
+    "金融": 0.0678
+  },
+  "positions": [
+    {
+      "rank": 1,
+      "symbol": "2887",
+      "name": "台新新光金",
+      "weight": 0.0678,
+      "industry": "金融",
+      "target_dollars": 339215.0,
+      "price_ref": 24.3
+    },
+    {
+      "rank": 2,
+      "symbol": "3702",
+      "name": "大聯大",
+      "weight": 0.0548,
+      "industry": "電子中上游",
+      "target_dollars": 274094.0,
+      "price_ref": 98.8
+    },
+    {
+      "rank": 3,
+      "symbol": "1560",
+      "name": "中砂",
+      "weight": 0.0444,
+      "industry": "傳產",
+      "target_dollars": 222018.0,
+      "price_ref": 533.0
+    },
+    {
+      "rank": 4,
+      "symbol": "3131",
+      "name": "弘塑",
+      "weight": 0.0425,
+      "industry": "電子中上游",
+      "target_dollars": 212268.0,
+      "price_ref": 3255.0
+    },
+    {
+      "rank": 5,
+      "symbol": "5274",
+      "name": "信驊",
+      "weight": 0.0412,
+      "industry": "電子下游",
+      "target_dollars": 206132.0,
+      "price_ref": 13805.0
+    },
+    {
+      "rank": 6,
+      "symbol": "2308",
+      "name": "台達電",
+      "weight": 0.0408,
+      "industry": "電子零組件",
+      "target_dollars": 203934.0,
+      "price_ref": 1840.0
+    },
+    {
+      "rank": 7,
+      "symbol": "3017",
+      "name": "奇鋐",
+      "weight": 0.0407,
+      "industry": "電子中上游",
+      "target_dollars": 203506.0,
+      "price_ref": 2400.0
+    },
+    {
+      "rank": 8,
+      "symbol": "6805",
+      "name": "富世達",
+      "weight": 0.0407,
+      "industry": "電子下游",
+      "target_dollars": 203358.0,
+      "price_ref": 1870.0
+    },
+    {
+      "rank": 9,
+      "symbol": "2345",
+      "name": "智邦",
+      "weight": 0.0397,
+      "industry": "電子零組件",
+      "target_dollars": 198627.0,
+      "price_ref": 2070.0
+    },
+    {
+      "rank": 10,
+      "symbol": "6274",
+      "name": "台燿",
+      "weight": 0.0396,
+      "industry": "電子下游",
+      "target_dollars": 198027.0,
+      "price_ref": 946.0
+    },
+    {
+      "rank": 11,
+      "symbol": "6223",
+      "name": "旺矽",
+      "weight": 0.0391,
+      "industry": "電子下游",
+      "target_dollars": 195433.0,
+      "price_ref": 5195.0
+    },
+    {
+      "rank": 12,
+      "symbol": "3653",
+      "name": "健策",
+      "weight": 0.039,
+      "industry": "電子中上游",
+      "target_dollars": 195063.0,
+      "price_ref": 4565.0
+    },
+    {
+      "rank": 13,
+      "symbol": "2467",
+      "name": "志聖",
+      "weight": 0.0384,
+      "industry": "電子零組件",
+      "target_dollars": 192214.0,
+      "price_ref": 550.0
+    },
+    {
+      "rank": 14,
+      "symbol": "2383",
+      "name": "台光電",
+      "weight": 0.0384,
+      "industry": "電子零組件",
+      "target_dollars": 192120.0,
+      "price_ref": 3800.0
+    },
+    {
+      "rank": 15,
+      "symbol": "6640",
+      "name": "均華",
+      "weight": 0.0373,
+      "industry": "電子下游",
+      "target_dollars": 186632.0,
+      "price_ref": 1620.0
+    },
+    {
+      "rank": 16,
+      "symbol": "2360",
+      "name": "致茂",
+      "weight": 0.0371,
+      "industry": "電子零組件",
+      "target_dollars": 185585.0,
+      "price_ref": 2255.0
+    },
+    {
+      "rank": 17,
+      "symbol": "1815",
+      "name": "富喬",
+      "weight": 0.037,
+      "industry": "傳產",
+      "target_dollars": 185017.0,
+      "price_ref": 127.0
+    },
+    {
+      "rank": 18,
+      "symbol": "8996",
+      "name": "高力",
+      "weight": 0.0367,
+      "industry": "觀光食品",
+      "target_dollars": 183388.0,
+      "price_ref": 1220.0
+    },
+    {
+      "rank": 19,
+      "symbol": "8021",
+      "name": "尖點",
+      "weight": 0.0361,
+      "industry": "觀光食品",
+      "target_dollars": 180682.0,
+      "price_ref": 390.5
+    },
+    {
+      "rank": 20,
+      "symbol": "1303",
+      "name": "南亞",
+      "weight": 0.0361,
+      "industry": "傳產",
+      "target_dollars": 180291.0,
+      "price_ref": 87.7
+    },
+    {
+      "rank": 21,
+      "symbol": "4991",
+      "name": "環宇-KY",
+      "weight": 0.0354,
+      "industry": "電子中上游",
+      "target_dollars": 176857.0,
+      "price_ref": 660.0
+    },
+    {
+      "rank": 22,
+      "symbol": "8046",
+      "name": "南電",
+      "weight": 0.0353,
+      "industry": "觀光食品",
+      "target_dollars": 176561.0,
+      "price_ref": 724.0
+    },
+    {
+      "rank": 23,
+      "symbol": "6683",
+      "name": "雍智科技",
+      "weight": 0.0346,
+      "industry": "電子下游",
+      "target_dollars": 173124.0,
+      "price_ref": 1870.0
+    },
+    {
+      "rank": 24,
+      "symbol": "3081",
+      "name": "聯亞",
+      "weight": 0.0344,
+      "industry": "電子中上游",
+      "target_dollars": 172131.0,
+      "price_ref": 2600.0
+    },
+    {
+      "rank": 25,
+      "symbol": "2337",
+      "name": "旺宏",
+      "weight": 0.0327,
+      "industry": "電子零組件",
+      "target_dollars": 163725.0,
+      "price_ref": 131.0
+    }
+  ],
+  "actions": [
+    {
+      "symbol": "2887",
+      "action": "BUY",
+      "target_weight": 0.0678,
+      "target_lots": 13,
+      "target_shares": 13000,
+      "target_dollars": 315900.0,
+      "price_ref": 24.3,
+      "current_quantity": 0,
+      "name": "台新新光金"
+    },
+    {
+      "symbol": "3702",
+      "action": "BUY",
+      "target_weight": 0.0548,
+      "target_lots": 2,
+      "target_shares": 2000,
+      "target_dollars": 197600.0,
+      "price_ref": 98.8,
+      "current_quantity": 0,
+      "name": "大聯大"
+    },
+    {
+      "symbol": "1560",
+      "action": "BUY",
+      "target_weight": 0.0444,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 533000.0,
+      "price_ref": 533.0,
+      "current_quantity": 0,
+      "name": "中砂"
+    },
+    {
+      "symbol": "3131",
+      "action": "BUY",
+      "target_weight": 0.0425,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 3255000.0,
+      "price_ref": 3255.0,
+      "current_quantity": 0,
+      "name": "弘塑"
+    },
+    {
+      "symbol": "5274",
+      "action": "BUY",
+      "target_weight": 0.0412,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 13805000.0,
+      "price_ref": 13805.0,
+      "current_quantity": 0,
+      "name": "信驊"
+    },
+    {
+      "symbol": "2308",
+      "action": "BUY",
+      "target_weight": 0.0408,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 1840000.0,
+      "price_ref": 1840.0,
+      "current_quantity": 0,
+      "name": "台達電"
+    },
+    {
+      "symbol": "3017",
+      "action": "BUY",
+      "target_weight": 0.0407,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 2400000.0,
+      "price_ref": 2400.0,
+      "current_quantity": 0,
+      "name": "奇鋐"
+    },
+    {
+      "symbol": "6805",
+      "action": "BUY",
+      "target_weight": 0.0407,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 1870000.0,
+      "price_ref": 1870.0,
+      "current_quantity": 0,
+      "name": "富世達"
+    },
+    {
+      "symbol": "2345",
+      "action": "BUY",
+      "target_weight": 0.0397,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 2070000.0,
+      "price_ref": 2070.0,
+      "current_quantity": 0,
+      "name": "智邦"
+    },
+    {
+      "symbol": "6274",
+      "action": "BUY",
+      "target_weight": 0.0396,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 946000.0,
+      "price_ref": 946.0,
+      "current_quantity": 0,
+      "name": "台燿"
+    },
+    {
+      "symbol": "6223",
+      "action": "BUY",
+      "target_weight": 0.0391,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 5195000.0,
+      "price_ref": 5195.0,
+      "current_quantity": 0,
+      "name": "旺矽"
+    },
+    {
+      "symbol": "3653",
+      "action": "BUY",
+      "target_weight": 0.039,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 4565000.0,
+      "price_ref": 4565.0,
+      "current_quantity": 0,
+      "name": "健策"
+    },
+    {
+      "symbol": "2383",
+      "action": "BUY",
+      "target_weight": 0.0384,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 3800000.0,
+      "price_ref": 3800.0,
+      "current_quantity": 0,
+      "name": "台光電"
+    },
+    {
+      "symbol": "2467",
+      "action": "BUY",
+      "target_weight": 0.0384,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 550000.0,
+      "price_ref": 550.0,
+      "current_quantity": 0,
+      "name": "志聖"
+    },
+    {
+      "symbol": "6640",
+      "action": "BUY",
+      "target_weight": 0.0373,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 1620000.0,
+      "price_ref": 1620.0,
+      "current_quantity": 0,
+      "name": "均華"
+    },
+    {
+      "symbol": "2360",
+      "action": "BUY",
+      "target_weight": 0.0371,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 2255000.0,
+      "price_ref": 2255.0,
+      "current_quantity": 0,
+      "name": "致茂"
+    },
+    {
+      "symbol": "1815",
+      "action": "BUY",
+      "target_weight": 0.037,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 127000.0,
+      "price_ref": 127.0,
+      "current_quantity": 0,
+      "name": "富喬"
+    },
+    {
+      "symbol": "8996",
+      "action": "BUY",
+      "target_weight": 0.0367,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 1220000.0,
+      "price_ref": 1220.0,
+      "current_quantity": 0,
+      "name": "高力"
+    },
+    {
+      "symbol": "1303",
+      "action": "BUY",
+      "target_weight": 0.0361,
+      "target_lots": 2,
+      "target_shares": 2000,
+      "target_dollars": 175400.0,
+      "price_ref": 87.7,
+      "current_quantity": 0,
+      "name": "南亞"
+    },
+    {
+      "symbol": "8021",
+      "action": "BUY",
+      "target_weight": 0.0361,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 390500.0,
+      "price_ref": 390.5,
+      "current_quantity": 0,
+      "name": "尖點"
+    },
+    {
+      "symbol": "4991",
+      "action": "BUY",
+      "target_weight": 0.0354,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 660000.0,
+      "price_ref": 660.0,
+      "current_quantity": 0,
+      "name": "環宇-KY"
+    },
+    {
+      "symbol": "8046",
+      "action": "BUY",
+      "target_weight": 0.0353,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 724000.0,
+      "price_ref": 724.0,
+      "current_quantity": 0,
+      "name": "南電"
+    },
+    {
+      "symbol": "6683",
+      "action": "BUY",
+      "target_weight": 0.0346,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 1870000.0,
+      "price_ref": 1870.0,
+      "current_quantity": 0,
+      "name": "雍智科技"
+    },
+    {
+      "symbol": "3081",
+      "action": "BUY",
+      "target_weight": 0.0344,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 2600000.0,
+      "price_ref": 2600.0,
+      "current_quantity": 0,
+      "name": "聯亞"
+    },
+    {
+      "symbol": "2337",
+      "action": "BUY",
+      "target_weight": 0.0327,
+      "target_lots": 1,
+      "target_shares": 1000,
+      "target_dollars": 131000.0,
+      "price_ref": 131.0,
+      "current_quantity": 0,
+      "name": "旺宏"
+    }
+  ]
+}

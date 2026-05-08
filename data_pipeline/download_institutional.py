@@ -36,6 +36,14 @@ import argparse
 import requests
 from datetime import date, datetime, timedelta
 from pathlib import Path
+
+# 自動讀 .env（讓 token 不用手動 export）
+try:
+    from dotenv import load_dotenv
+    load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
+except ImportError:
+    pass
+from pathlib import Path
 from typing import List, Optional, Dict, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 

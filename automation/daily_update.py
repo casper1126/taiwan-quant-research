@@ -40,10 +40,18 @@ from notifier import notify_all
 # ── 設定 ──────────────────────────────────────────────────────
 # 使用絕對路徑以避免相對路徑問題（無論從哪個目錄執行都能找到）
 BASE_DIR       = Path(__file__).parent.parent  # 項目根目錄
+
+# 自動讀 .env（讓 token 不用手動 export）
+try:
+    from dotenv import load_dotenv
+    load_dotenv(dotenv_path=BASE_DIR / ".env")
+except ImportError:
+    pass
+
 DB_PATH        = str(BASE_DIR / "data" / "taiwan_stock.db")
 SIGNALS_DIR    = BASE_DIR / "signals"
 FINMIND_URL    = "https://api.finmindtrade.com/api/v4/data"
-FINMIND_TOKEN  = os.getenv("eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiY2FzcGVyaHNpYW8iLCJlbWFpbCI6ImNhc3BlcmhzaWFvMjZAZ21haWwuY29tIn0.tqP_VGSZGt3G-7wUc3Suu40rcvwC3p3tGdE6kGMx0LM", "")
+FINMIND_TOKEN  = os.getenv("FINMIND_TOKEN", "")
 
 # 策略參數（與 quant_layer2.py 保持一致）
 LOOKBACK   = 120
@@ -346,11 +354,30 @@ def generate_signals(data: dict) -> tuple:
                                   x.get("rank", 99)))
 
     # ── 簡易績效計算（近 252 天）─────────────────────────────
-    stats = _compute_recent_stats(close)
-    stats["market_score"] = f"{market_score:.2f}"
-    stats["holdings"]     = len(top)
+    # --- attach stock names (if available) ---
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute("SELECT stock_id, stock_name FROM load_manifest").fetchall()
+        conn.close()
+        name_map = {r[0]: r[1] for r in rows}
+    except Exception:
+        name_map = {}
 
-    logger.info(f"  今日持倉：{len(top)} 檔，大盤分數：{market_score:.2f}")
+    for s in signals:
+        s["stock_name"] = name_map.get(s["stock_id"], "")
+
+    # --- compute stats: prefer portfolio-based stats when we have holdings ---
+    holds = [s for s in signals if s.get("action") in ("BUY", "HOLD")]
+    if holds:
+        hold_ids = [s["stock_id"] for s in holds]
+        stats = _compute_portfolio_stats(close, hold_ids)
+    else:
+        stats = _compute_recent_stats(close)
+
+    stats["market_score"] = f"{market_score:.2f}"
+    stats["holdings"] = len(holds)
+
+    logger.info(f"  今日持倉：{len(holds)} 檔，大盤分數：{market_score:.2f}")
     return signals, stats
 
 
@@ -376,6 +403,39 @@ def _compute_recent_stats(close: pd.DataFrame,
         ann_vol = eq.std() * np.sqrt(252)
         sharpe  = (ann_ret - RF_RATE) / ann_vol if ann_vol > 0 else 0
         mdd     = ((1 + eq).cumprod() / (1 + eq).cumprod().cummax() - 1).min()
+
+        return {
+            "annual_return": f"{ann_ret*100:.1f}%",
+            "max_drawdown":  f"{mdd*100:.1f}%",
+            "sharpe":        f"{sharpe:.2f}",
+        }
+    except Exception:
+        return {"annual_return": "N/A", "max_drawdown": "N/A", "sharpe": "N/A"}
+
+
+def _compute_portfolio_stats(close: pd.DataFrame,
+                             holdings: list,
+                             lookback_days: int = 252) -> dict:
+    """
+    Compute simple equal-weighted portfolio stats for the given holdings
+    over the last `lookback_days` trading days.
+    """
+    try:
+        cols = [h for h in holdings if h in close.columns]
+        if not cols:
+            return {"annual_return": "N/A", "max_drawdown": "N/A", "sharpe": "N/A"}
+
+        recent = close[cols].iloc[-lookback_days:]
+        recent = recent.dropna(axis=1, how="all")
+        eq = recent.mean(axis=1).pct_change().dropna()
+        if eq.empty:
+            return {"annual_return": "N/A", "max_drawdown": "N/A", "sharpe": "N/A"}
+
+        total = (1 + eq).prod() - 1
+        ann_ret = (1 + total) ** (252 / max(len(eq), 1)) - 1
+        ann_vol = eq.std() * np.sqrt(252)
+        sharpe = (ann_ret - RF_RATE) / ann_vol if ann_vol > 0 else 0
+        mdd = ((1 + eq).cumprod() / (1 + eq).cumprod().cummax() - 1).min()
 
         return {
             "annual_return": f"{ann_ret*100:.1f}%",
