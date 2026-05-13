@@ -449,9 +449,29 @@ def download_one(stock_id: str, db_path: str, token: str,
     return result
 
 
+def get_top_n_universe(db_path: str, top_n: int,
+                        lookback_days: int = 365) -> List[str]:
+    """
+    取「過去 N 天平均成交金額」前 top_n 檔活躍股。
+    用於 --top 參數，只更新策略真正會用到的投資宇宙（top 300）。
+    """
+    cutoff = (date.today() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("""
+            SELECT stock_id
+            FROM daily_price
+            WHERE date > ?
+            GROUP BY stock_id
+            HAVING AVG(close * volume) > 0
+            ORDER BY AVG(close * volume) DESC
+            LIMIT ?
+        """, (cutoff, top_n)).fetchall()
+    return [r[0] for r in rows]
+
+
 def download_all(db_path: str, token: str, start: str = DEFAULT_START,
                  force: bool = False, sid_filter: Optional[str] = None,
-                 workers: int = 1) -> None:
+                 workers: int = 1, top_n: Optional[int] = None) -> None:
     """
     批次下載所有股票的三大法人資料（支援並行）。
 
@@ -463,10 +483,18 @@ def download_all(db_path: str, token: str, start: str = DEFAULT_START,
     force      : True 時忽略增量，從 start 重新下載
     sid_filter : 只下載指定股票（None 表示全部）
     workers    : 並行下載數（預設 1 = 順序）
+    top_n      : 只下載「過去 365 日成交額前 top_n 檔」（None = 全部）
+                 推薦每日更新用 top_n=300（投資宇宙），快 7×
     """
     init_table(db_path)
 
-    stock_ids = [sid_filter] if sid_filter else get_stock_list(db_path)
+    if sid_filter:
+        stock_ids = [sid_filter]
+    elif top_n:
+        stock_ids = get_top_n_universe(db_path, top_n)
+        logger.info(f"🎯 --top {top_n}：只下載活躍宇宙前 {len(stock_ids)} 檔")
+    else:
+        stock_ids = get_stock_list(db_path)
     if not stock_ids:
         logger.error(
             "❌ load_manifest 為空！請先執行：python run.py --step 1"
@@ -550,7 +578,8 @@ def download_all(db_path: str, token: str, start: str = DEFAULT_START,
                 failed_stocks.append(sid)
                 logger.warning(f"  [{sid}] ✗ 異常：{e}")
 
-            time.sleep(RATE_LIMIT_S)
+            # 注意：不需在這裡 sleep。RateLimiter.acquire() 已在每次 API 呼叫前
+            # 動態 sleep（依當前 quota 狀況）。多此一舉的 sleep 會拖慢下載。
 
     elapsed = time.time() - start_time
 
@@ -598,6 +627,10 @@ if __name__ == "__main__":
         "--workers", type=int, default=1,
         help="並行下載數（預設 1 = 順序）。建議 2–4 以降低 API 限制風險"
     )
+    parser.add_argument(
+        "--top", type=int, default=None,
+        help="只下載過去 365 日成交額前 N 檔（推薦每日用 --top 300，快 7×）"
+    )
     args = parser.parse_args()
 
     # 初始化日誌
@@ -626,4 +659,5 @@ if __name__ == "__main__":
         force      = args.force,
         sid_filter = args.sid,
         workers    = args.workers,
+        top_n      = args.top,
     )

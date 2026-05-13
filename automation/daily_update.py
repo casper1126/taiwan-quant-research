@@ -485,12 +485,20 @@ if __name__ == "__main__":
     logger.info("\n📊 Step 1b：增量下載籌碼資料（三大法人）...")
     incremental_institutional_update()  # 失敗不中止
 
-    # Step 2：計算今日訊號
+    # ⚠️ Step 2-4 已停用：daily_update.py 用的是舊 Layer 2 訊號邏輯（含 bug，
+    # 會產生空訊號 / -73% MDD 這類錯誤結果，會覆蓋 predict_model.py 的正確訊號）。
+    # 訊號生成請改用 predict_model.py（N1 v2 ML 最終策略）。
+    logger.info("\n✅ 資料更新完成。產生最新訊號請執行：python predict_model.py")
+    logger.info(f"\n✅ 每日更新完成：{today}")
+    return  # ← 跳過下面的舊訊號邏輯
+
+    # ─────────── 以下是舊邏輯，已停用 ───────────────────
+    # Step 2：計算今日訊號（舊 Layer 2，已棄用）
     logger.info("\n🧠 Step 2：計算今日持倉訊號...")
     data    = load_matrices_for_signal(DB_PATH)
     signals, stats = generate_signals(data)
 
-    # Step 3：儲存訊號
+    # Step 3：儲存訊號（會覆蓋 predict_model.py 的好訊號 → 已停用）
     logger.info("\n💾 Step 3：儲存訊號...")
     save_signals(signals, stats, today)
 

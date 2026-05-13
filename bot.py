@@ -450,86 +450,265 @@ async def run_model(interaction: discord.Interaction):
             pass
 
 
-@bot.tree.command(name="update_data",
-                   description="從 FinMind 抓最新股票資料（價格/估值/月營收/籌碼）")
-@is_admin()
-async def update_data(interaction: discord.Interaction):
-    """跑 automation/daily_update.py 更新所有資料。"""
+async def _run_subprocess_async(script_path,
+                                  channel=None,
+                                  label: str = "",
+                                  heartbeat_interval: int = 300,
+                                  extra_args: list = None) -> tuple:
+    """
+    用 asyncio.create_subprocess_exec 跑 script（非同步，無 15 分鐘綁定）。
+
+    串流 stdout/stderr 並：
+      ① 抓重要進度行（含「進度」「✅」「❌」「⚠️」「完成」「Error」「📥」「📊」）
+      ② 每 heartbeat_interval 秒（預設 5 分鐘）發 heartbeat 到 channel
+      ③ 全部 stdout/stderr 收集起來給最後的 result embed
+
+    Args:
+      script_path:        要跑的 Python 檔
+      channel:            Discord channel（None 不發 heartbeat）
+      label:              heartbeat 訊息中的標籤
+      heartbeat_interval: 秒（預設 300 = 5 分鐘）
+
+    Returns: (returncode, stdout_str, stderr_str)
+    """
+    import time as _t
+
+    if not Path(script_path).exists():
+        return -1, "", f"找不到 script: {script_path}"
+
+    # -u: 關 Python stdout buffer，讓 progress 即時看得到
+    cmd = ["python", "-u", str(script_path)]
+    if extra_args:
+        cmd.extend(extra_args)
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=str(BASE_DIR),
+    )
+
+    stdout_lines: list = []
+    stderr_lines: list = []
+    progress_lines: list = []
+
+    PROGRESS_KEYWORDS = ("進度", "✅", "❌", "⚠️", "完成",
+                          "Error", "📥", "📊", "✗", "✓", "Progress")
+
+    async def _read_stream(stream, line_buffer):
+        while True:
+            try:
+                line_bytes = await stream.readline()
+            except Exception:
+                break
+            if not line_bytes:
+                break
+            line = line_bytes.decode("utf-8", errors="replace").rstrip()
+            line_buffer.append(line)
+            if any(kw in line for kw in PROGRESS_KEYWORDS):
+                progress_lines.append(line)
+
+    stdout_task = asyncio.create_task(_read_stream(proc.stdout, stdout_lines))
+    stderr_task = asyncio.create_task(_read_stream(proc.stderr, stderr_lines))
+
+    start_t = _t.time()
+    last_heartbeat = _t.time()
+
+    # 主迴圈：定時送 heartbeat 直到 process 結束
+    while True:
+        try:
+            # 短暫等 process 結束（順便當 sleep 用）
+            await asyncio.wait_for(proc.wait(), timeout=15)
+            break    # process 已結束
+        except asyncio.TimeoutError:
+            pass     # 還在跑，繼續
+
+        now = _t.time()
+        if channel and (now - last_heartbeat) >= heartbeat_interval:
+            elapsed = now - start_t
+            recent = progress_lines[-8:] if progress_lines else []
+            recent_text = "\n".join(recent)[:1200] if recent else "(尚無 stdout 進度輸出)"
+            try:
+                msg = (f"💓 **{label}** 仍在執行 ({elapsed:.0f}s 已過)\n"
+                       f"```\n{recent_text}\n```")
+                await channel.send(msg[:1900])
+            except Exception:
+                pass
+            last_heartbeat = now
+            # 保留最近 50 行避免無限增長
+            if len(progress_lines) > 50:
+                progress_lines[:] = progress_lines[-50:]
+
+    # process 結束，等 stream 讀取也完成
     try:
-        update_script = BASE_DIR / "automation" / "daily_update.py"
-        if not update_script.exists():
+        await asyncio.wait_for(asyncio.gather(stdout_task, stderr_task,
+                                                return_exceptions=True),
+                                 timeout=5)
+    except asyncio.TimeoutError:
+        pass
+
+    return (proc.returncode,
+            "\n".join(stdout_lines),
+            "\n".join(stderr_lines))
+
+
+def _build_result_embed(scripts: list, labels: list,
+                         results: list, elapsed: float, title: str) -> Embed:
+    """把 subprocess 結果包成 Embed。"""
+    all_ok = all(r is not None and r[0] == 0 for r in results)
+    embed = Embed(
+        title=title,
+        color=0x00FF00 if all_ok else 0xFFA500,
+        timestamp=datetime.utcnow(),
+    )
+    for label, r in zip(labels, results):
+        if r is None:
+            embed.add_field(name=label, value="⚠️ 找不到 script", inline=True)
+        else:
+            rc = r[0]
+            embed.add_field(
+                name=label,
+                value="✅ 成功" if rc == 0 else f"❌ 失敗 ({rc})",
+                inline=True,
+            )
+    embed.add_field(name="耗時", value=f"{elapsed:.0f} 秒", inline=True)
+
+    for label, r in zip(labels, results):
+        if r is None:
+            continue
+        rc, out, err = r
+        if rc != 0 and err:
+            embed.add_field(name=f"⚠️ {label} 錯誤",
+                            value=f"```\n{err[-400:]}\n```", inline=False)
+        else:
+            tail = "\n".join((out or "").strip().split("\n")[-6:])
+            if tail:
+                embed.add_field(name=f"📋 {label} 摘要",
+                                value=f"```\n{tail[:500]}\n```", inline=False)
+    return embed
+
+
+async def _run_update_background(channel, scripts: list, labels: list, title: str,
+                                   heartbeat_interval: int = 300,
+                                   script_args: list = None):
+    """
+    背景任務：跑 scripts，跑完發 embed 到 channel。
+    每 heartbeat_interval 秒會發一次「💓 still running」進度訊息。
+
+    script_args: 與 scripts 對齊的 extra args list（例如 [["--top","300"], None]）
+    """
+    try:
+        start_time = datetime.utcnow()
+        results = []
+        for i, (script, label) in enumerate(zip(scripts, labels)):
+            await channel.send(f"▶️ **{label}** 開始執行...")
+            extras = (script_args[i] if script_args and i < len(script_args) else None)
+            r = await _run_subprocess_async(
+                script,
+                channel=channel,
+                label=label,
+                heartbeat_interval=heartbeat_interval,
+                extra_args=extras,
+            )
+            results.append(r)
+            rc = r[0]
+            status = "✅ 完成" if rc == 0 else f"❌ 失敗 (code={rc})"
+            await channel.send(f"⏹️ **{label}** {status}")
+
+        elapsed = (datetime.utcnow() - start_time).total_seconds()
+        embed = _build_result_embed(scripts, labels, results, elapsed, title)
+        embed.set_footer(text="跑完後產生最新訊號用 /run_model")
+        await channel.send(embed=embed)
+    except Exception as e:
+        try:
+            await channel.send(f"⚠️ 背景更新失敗：{e}")
+        except Exception:
+            pass
+        await notify_admin(f"_run_update_background 失敗：{e}")
+
+
+@bot.tree.command(
+    name="update_data",
+    description="更新股票資料（背景跑，跑完到頻道通知）",
+)
+@app_commands.describe(source="價格資料來源")
+@app_commands.choices(source=[
+    app_commands.Choice(name="Fugle (推薦) — 股價 + FinMind 籌碼", value="fugle"),
+    app_commands.Choice(name="FinMind 全包（舊行為）", value="finmind"),
+])
+@is_admin()
+async def update_data(interaction: discord.Interaction,
+                       source: app_commands.Choice[str] = None):
+    """
+    啟動背景任務跑資料更新。立刻 acknowledge 不卡 Discord 15 分鐘 token。
+    跑完直接發 embed 到 NOTIFICATION_CHANNEL_ID。
+    """
+    try:
+        mode = source.value if source else "fugle"
+
+        channel = await get_notification_channel()
+        if channel is None:
             await interaction.response.send_message(
-                "⚠️ 找不到 automation/daily_update.py。"
+                "⚠️ NOTIFICATION_CHANNEL_ID 未設定，跑完無處可推。"
             )
             return
 
-        # 預設防呆：FINMIND_TOKEN 沒設就提早噴
-        token = os.getenv("FINMIND_TOKEN", "").strip()
-        if not token:
+        if mode == "fugle":
+            if not os.getenv("FUGLE_API_KEY", "").strip():
+                await interaction.response.send_message(
+                    "⚠️ FUGLE_API_KEY 未設定（.env 找不到）。\n"
+                    "申請：https://developer.fugle.tw/"
+                )
+                return
+            if not os.getenv("FINMIND_TOKEN", "").strip():
+                await interaction.response.send_message(
+                    "⚠️ FINMIND_TOKEN 未設定（即使用 Fugle，籌碼仍需 FinMind）。"
+                )
+                return
+
             await interaction.response.send_message(
-                "⚠️ FINMIND_TOKEN 未設定（.env 找不到）。請先加進去再跑。"
+                "📡 **已啟動背景更新（Fugle + FinMind, --top 300）**\n"
+                "  ① Fugle 抓最新股價（OHLCV，前 300 活躍股）\n"
+                "  ② FinMind 抓最新籌碼（前 300 活躍股）\n"
+                "預計 30-60 分鐘（之前抓全部 2,056 檔要 9 hr，現在只抓投資宇宙）。\n"
+                "**跑完會直接在頻道發結果**，這個訊息可以無視。"
             )
+            asyncio.create_task(_run_update_background(
+                channel,
+                scripts=[
+                    BASE_DIR / "data_pipeline" / "update_prices_fugle.py",
+                    BASE_DIR / "data_pipeline" / "download_institutional.py",
+                ],
+                labels=["Fugle 股價", "FinMind 籌碼"],
+                title="📡 股票資料更新完成（Fugle + FinMind，top 300）",
+                script_args=[
+                    ["--top", "300"],   # Fugle
+                    ["--top", "300", "--workers", "2"],  # FinMind
+                ],
+            ))
+            return
+
+        if not os.getenv("FINMIND_TOKEN", "").strip():
+            await interaction.response.send_message("⚠️ FINMIND_TOKEN 未設定。")
             return
 
         await interaction.response.send_message(
-            "📡 開始更新股票資料（FinMind 抓最新價格/估值/月營收/籌碼）\n"
-            "預計 1-5 分鐘，跑完會在頻道通知..."
+            "📡 **已啟動背景更新（FinMind 全包）**\n"
+            "可能需 5-30 分鐘。**跑完會直接發到頻道**。"
         )
+        asyncio.create_task(_run_update_background(
+            channel,
+            scripts=[BASE_DIR / "automation" / "daily_update.py"],
+            labels=["FinMind 全包"],
+            title="📡 股票資料更新完成（FinMind）",
+        ))
 
-        start_time = datetime.utcnow()
-        result = await asyncio.to_thread(
-            subprocess.run,
-            ["python", str(update_script)],
-            capture_output=True,
-            text=True,
-            cwd=str(BASE_DIR),
-            timeout=900,   # 15 分鐘 timeout
-        )
-        elapsed = (datetime.utcnow() - start_time).total_seconds()
-
-        # 解析輸出找關鍵摘要
-        out = (result.stdout or "")[-2000:]   # 取最後 2000 字
-        err = (result.stderr or "")[-500:]
-
-        embed = Embed(
-            title="📡 股票資料更新結果",
-            color=0x00FF00 if result.returncode == 0 else 0xFF4500,
-            timestamp=datetime.utcnow(),
-        )
-        embed.add_field(
-            name="狀態",
-            value="✅ 成功" if result.returncode == 0 else f"❌ 失敗 (code={result.returncode})",
-            inline=True,
-        )
-        embed.add_field(name="耗時", value=f"{elapsed:.0f} 秒", inline=True)
-
-        # 嘗試從 stdout 抓筆數摘要（daily_update.py 會印「✅ XXX 筆」）
-        rows_inserted = []
-        for line in out.split("\n"):
-            if "新增" in line or "更新" in line or "✅" in line:
-                rows_inserted.append(line.strip())
-        if rows_inserted:
-            summary = "\n".join(rows_inserted[-8:])
-            embed.add_field(name="📋 摘要（最後 8 行）",
-                            value=f"```\n{summary[:1000]}\n```",
-                            inline=False)
-
-        if result.returncode != 0 and err:
-            embed.add_field(name="⚠️ 錯誤訊息（後 500 字）",
-                            value=f"```\n{err}\n```",
-                            inline=False)
-
-        embed.set_footer(text="跑完後若要產生最新訊號，記得 /run_model")
-        await interaction.followup.send(embed=embed)
-
-    except subprocess.TimeoutExpired:
-        await interaction.followup.send("⚠️ 更新逾時（>15 分鐘），請改在 terminal 執行查看細節。")
     except Exception as e:
         await notify_admin(f"update_data 指令發生錯誤：{e}")
         try:
-            await interaction.followup.send(f"⚠️ 更新失敗：{e}")
+            await interaction.response.send_message(f"⚠️ 啟動失敗：{e}")
         except Exception:
             pass
+
 
 
 @bot.tree.command(name="post_signals",
