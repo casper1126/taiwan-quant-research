@@ -1,0 +1,106 @@
+//@version=6
+strategy("Taiwan Multi-Factor Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === 策略參數 ===
+lookback = input.int(120, "動能回溯天數", minval=20)
+top_n = input.int(30, "持有檔數", minval=5)
+rebal_freq = input.int(120, "再平衡頻率", minval=20)
+bias_cap = input.float(0.10, "乖離率上限", minval=0.01, step=0.01)
+buffer_mult = input.float(1.5, "緩衝區倍數", minval=1.0, step=0.1)
+
+// === 因子權重 ===
+momentum_w = input.float(0.15, "動能權重", minval=0.0, step=0.01)
+value_w = input.float(0.20, "價值權重", minval=0.0, step=0.01)
+rev_yoy_w = input.float(0.20, "營收YoY權重", minval=0.0, step=0.01)
+low_vol_w = input.float(0.15, "低波動權重", minval=0.0, step=0.01)
+inst_flow_w = input.float(0.30, "籌碼權重", minval=0.0, step=0.01)
+
+// === 因子計算 ===
+
+// 1. 52週新高動能 (momentum)
+high_252 = ta.highest(high, 252)
+momentum = close / high_252
+
+// 2. 價值因子 (使用 P/E 估計，TradingView 沒有直接 PER)
+pe_ratio = close / (close - nz(close[1], close) + ta.sma(close, 252) * 0.02)  // 簡化估計
+value = 1.0 / nz(pe_ratio, 20.0)
+
+// 3. 營收YoY (使用成交量變化作為代理)
+volume_ma = ta.sma(volume, 252)
+rev_yoy = volume / volume_ma
+
+// 4. 低波動因子 (60日波動性倒數)
+daily_ret = ta.change(close) / nz(close[1], close)
+ivol_60 = ta.stdev(daily_ret, 60)
+low_vol = 1.0 / nz(ivol_60, 1.0)
+
+// 5. 籌碼因子 (使用外資買賣超代理，簡化為成交量趨勢)
+volume_trend = ta.sma(volume, 60) / ta.sma(volume, 252)
+inst_flow = volume_trend
+
+// === 篩選條件 ===
+bias = (close - ta.sma(close, 20)) / ta.sma(close, 20)
+valid = math.abs(bias) < bias_cap
+
+// === 合成因子分數 ===
+composite_score = 0.0
+composite_score += momentum * momentum_w
+composite_score += value * value_w
+composite_score += rev_yoy * rev_yoy_w
+composite_score += low_vol * low_vol_w
+composite_score += inst_flow * inst_flow_w
+
+// 正規化分數 (簡化版)
+score_mean = ta.sma(composite_score, 20)
+score_std = ta.stdev(composite_score, 20)
+z_score = (composite_score - score_mean) / score_std
+
+// === 擇時機制 (四重均線) ===
+ma10 = ta.sma(close, 10)
+ma30 = ta.sma(close, 30)
+ma60 = ta.sma(close, 60)
+ma120 = ta.sma(close, 120)
+
+timing_score = 0.0
+timing_score += close > ma10 ? 0.25 : 0.0
+timing_score += close > ma30 ? 0.25 : 0.0
+timing_score += close > ma60 ? 0.25 : 0.0
+timing_score += close > ma120 ? 0.25 : 0.0
+
+// === 交易邏輯 ===
+in_position = strategy.position_size != 0
+
+// 進場條件
+enter_condition = valid and z_score > 0 and timing_score >= 0.75 and not in_position
+
+// 計算進場後的 K 棒數
+var int entry_bar = -1
+if enter_condition
+    entry_bar := bar_index
+bars_since_entry = entry_bar >= 0 ? bar_index - entry_bar : 0
+
+// 出場條件 (再平衡或因子惡化)
+exit_condition = in_position and (
+    nz(bars_since_entry, 0) >= rebal_freq or
+    z_score < -1.0 or
+    timing_score < 0.25
+)
+
+// === 執行交易 ===
+if enter_condition
+    strategy.entry("Long", strategy.long)
+
+if exit_condition
+    strategy.close("Long")
+
+// === 視覺化 ===
+plot(z_score, color=color.blue, title="Composite Z-Score")
+plot(timing_score, color=color.green, title="Timing Score")
+hline(0, title="Zero Line", color=color.gray)
+hline(0.75, title="Timing Threshold", color=color.green)
+hline(-1.0, title="Exit Threshold", color=color.red)
+
+// === 統計資訊 ===
+plotchar(valid, title="Valid Stock", char="•", location=location.belowbar, color=color.green, size=size.small)
+plotchar(enter_condition, title="Enter Signal", char="▲", location=location.belowbar, color=color.blue, size=size.normal)
+plotchar(exit_condition, title="Exit Signal", char="▼", location=location.abovebar, color=color.red, size=size.normal)
