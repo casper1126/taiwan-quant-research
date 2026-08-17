@@ -1,6 +1,11 @@
 # 資料庫（太大，不推）
 data/taiwan_stock.db
 data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# 下載程序互斥鎖（runtime 狀態，不是原始碼）
+data/.download_lock
 
 # 原始 CSV（太大）
 raw_data/

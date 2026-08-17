@@ -50,6 +50,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 from loguru import logger
 
+sys.path.insert(0, str(Path(__file__).parent))
+from download_lock import download_lock
+from finmind_common import QuotaExhaustedError, MAX_QUOTA_RETRY_CYCLES, sleep_with_heartbeat
+
 # ── 路徑設定 ──────────────────────────────────────────────────
 DB_PATH              = "data/taiwan_stock.db"
 FINMIND_URL          = "https://api.finmindtrade.com/api/v4/data"
@@ -249,12 +253,20 @@ def _fetch(stock_id: str, start_date: str, end_date: str,
            token: str, retries: int = 3) -> pd.DataFrame:
     """
     FinMind 單次 API 呼叫，含自動重試與智能速率限制。
-    
-    返回資料框或空 DF（無新資料或失敗）。
+
+    402（配額用盡）立刻拋出 QuotaExhaustedError，不重試——重試對配額用盡
+    沒有意義，只會繼續消耗僅剩的配額。呼叫端（download_one）負責處理休眠。
+    回傳空 DataFrame 現在只代表一種情況：FinMind 明確回應「有資料但是空的」。
+
+    （修復紀錄：原本這裡的 402 判斷寫在 resp.raise_for_status() 之後，
+    但 FinMind 對配額用盡回傳的是真正的 HTTP 402 狀態碼，raise_for_status()
+    會搶先丟出 HTTPError，導致這裡原本的「等待額度恢復」邏輯從未被執行到，
+    402 被 generic 的 HTTPError 分支接住、重試幾秒後就放棄，最終被上層誤判
+    成「無資料」。）
     """
     # 智能延遲：等待直到可安全發送請求（確保不超配額）
     _rate_limiter.acquire()
-    
+
     params = {
         "dataset":    DATASET,
         "data_id":    stock_id,
@@ -262,55 +274,56 @@ def _fetch(stock_id: str, start_date: str, end_date: str,
         "end_date":   end_date,
         "token":      token,
     }
-    
+
     for attempt in range(1, retries + 1):
         try:
             resp = requests.get(FINMIND_URL, params=params, timeout=30)
-            resp.raise_for_status()  # 檢查 HTTP 狀態
-            
+
+            # 必須在 raise_for_status() 之前檢查，見上方修復紀錄
+            if resp.status_code == 402:
+                raise QuotaExhaustedError(stock_id)
+
+            resp.raise_for_status()  # 檢查其他 HTTP 狀態
+
             data = resp.json()
             status = data.get("status")
-            
-            # FinMind 成功回應
-            if status == 200 and data.get("data"):
-                df = pd.DataFrame(data["data"])
+
+            if status == 402:
+                # 保留：以防 FinMind 未來改成 HTTP 200 + JSON status:402 的格式
+                raise QuotaExhaustedError(stock_id)
+
+            # FinMind 成功回應（data 可能是空陣列，代表真的沒有資料，是合法結果）
+            if status == 200:
+                df = pd.DataFrame(data.get("data") or [])
                 logger.debug(
                     f"    [{stock_id}] ✓ 成功：{len(df)} 筆（{start_date}~{end_date}）"
                 )
                 return df
-            
-            # API 速率限制（402）
-            elif status == 402:
-                used, remaining, _ = _rate_limiter.get_quota_usage()
-                logger.warning(
-                    f"    [{stock_id}] FinMind 402（attempt {attempt}/{retries}），"
-                    f"已用 {used}/600，等待額度恢復..."
-                )
-                _rate_limiter.force_wait_recovery()
-                continue
-            
+
             # 其他 FinMind 錯誤
-            else:
-                msg = data.get("message", "Unknown error")
-                logger.debug(f"    [{stock_id}] FinMind 錯誤（{status}）：{msg}")
-                return pd.DataFrame()
-                
+            msg = data.get("message", "Unknown error")
+            logger.debug(f"    [{stock_id}] FinMind 錯誤（{status}）：{msg}")
+            return pd.DataFrame()
+
+        except QuotaExhaustedError:
+            raise
+
         except requests.exceptions.Timeout:
             logger.warning(
                 f"    [{stock_id}] Timeout（attempt {attempt}/{retries}），重試..."
             )
             time.sleep(2 ** attempt)  # 指數退避
-            
+
         except requests.exceptions.HTTPError as e:
             logger.warning(
                 f"    [{stock_id}] HTTP 錯誤（{e.response.status_code}），重試..."
             )
             time.sleep(2 ** attempt)
-            
+
         except Exception as e:
             logger.error(f"    [{stock_id}] 異常：{type(e).__name__}: {e}")
             return pd.DataFrame()
-    
+
     logger.warning(f"    [{stock_id}] 最終失敗（{retries} 次重試後）")
     return pd.DataFrame()
 
@@ -420,7 +433,10 @@ def download_one(stock_id: str, db_path: str, token: str,
 
     Returns
     -------
-    dict : 包含 (status, rows_added, errors)
+    dict : 包含 (status, rows_added, errors)。status 可能是 "ok" /
+           "up_to_date" / "no_data"（FinMind 確認無資料，合法結果）/
+           "quota_exhausted"（402 配額用盡，需要呼叫端休眠後重試，
+           不能被當成 no_data 算進正常跳過）。
     """
     today = date.today().strftime("%Y-%m-%d")
     result = {"stock_id": stock_id, "rows": 0, "status": "ok"}
@@ -435,7 +451,12 @@ def download_one(stock_id: str, db_path: str, token: str,
         return result
 
     # 下載
-    df = _fetch(stock_id, start_date, today, token)
+    try:
+        df = _fetch(stock_id, start_date, today, token)
+    except QuotaExhaustedError:
+        result["status"] = "quota_exhausted"
+        return result
+
     if df.empty:
         result["status"] = "no_data"
         return result
@@ -469,11 +490,31 @@ def get_top_n_universe(db_path: str, top_n: int,
     return [r[0] for r in rows]
 
 
+def _next_hour_boundary() -> datetime:
+    """下一個整點時間。用於 402 配額用盡後計算休眠到什麼時候醒來。"""
+    now = datetime.now()
+    return now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+
+
 def download_all(db_path: str, token: str, start: str = DEFAULT_START,
                  force: bool = False, sid_filter: Optional[str] = None,
                  workers: int = 1, top_n: Optional[int] = None) -> None:
     """
     批次下載所有股票的三大法人資料（支援並行）。
+
+    全程持有 download_lock（見 download_lock.py）：同一時間只允許一個下載
+    程序執行，避免多個 process 各自以為自己有完整的 FINMIND_TOKEN 配額。
+
+    順序模式（workers=1，預設、也是唯一有完整自動休眠/恢復機制的模式）：
+    偵測到 402 配額用盡，會記錄目前的 checkpoint、休眠到下個整點自動醒來
+    繼續，期間定期印心跳 log，不需要人重新執行指令。連續 3 個整點週期醒來
+    後立刻又用盡，才視為異常，正常結束 process（不是 crash）並提示需要
+    人工確認。
+
+    並行模式（workers>1）：多執行緒協調休眠比較複雜，目前只做了正確性修復
+    （402 配額用盡不會被誤判成「無資料」）+ 簡易 circuit breaker（配額用盡
+    比例過高時提早中止），沒有完整的自動休眠/恢復。**需要無人值守的長時間
+    背景回填，建議用 workers=1。**
 
     Parameters
     ----------
@@ -482,104 +523,157 @@ def download_all(db_path: str, token: str, start: str = DEFAULT_START,
     start      : 起始日期（預設 2015-01-01）
     force      : True 時忽略增量，從 start 重新下載
     sid_filter : 只下載指定股票（None 表示全部）
-    workers    : 並行下載數（預設 1 = 順序）
+    workers    : 並行下載數（預設 1 = 順序，唯一有完整休眠/恢復機制的模式）
     top_n      : 只下載「過去 365 日成交額前 top_n 檔」（None = 全部）
                  推薦每日更新用 top_n=300（投資宇宙），快 7×
     """
-    init_table(db_path)
+    with download_lock("download_institutional.py"):
+        init_table(db_path)
 
-    if sid_filter:
-        stock_ids = [sid_filter]
-    elif top_n:
-        stock_ids = get_top_n_universe(db_path, top_n)
-        logger.info(f"🎯 --top {top_n}：只下載活躍宇宙前 {len(stock_ids)} 檔")
-    else:
-        stock_ids = get_stock_list(db_path)
-    if not stock_ids:
-        logger.error(
-            "❌ load_manifest 為空！請先執行：python run.py --step 1"
+        if sid_filter:
+            stock_ids = [sid_filter]
+        elif top_n:
+            stock_ids = get_top_n_universe(db_path, top_n)
+            logger.info(f"🎯 --top {top_n}：只下載活躍宇宙前 {len(stock_ids)} 檔")
+        else:
+            stock_ids = get_stock_list(db_path)
+        if not stock_ids:
+            logger.error(
+                "❌ load_manifest 為空！請先執行：python run.py --step 1"
+            )
+            return
+
+        logger.info(
+            f"📥 開始下載三大法人資料"
+            f"\n   股票數：{len(stock_ids)}"
+            f"\n   起始日：{start}"
+            f"\n   增量模式：{'否（強制重新下載）' if force else '是'}"
+            f"\n   並行度：{workers}"
         )
-        return
 
-    logger.info(
-        f"📥 開始下載三大法人資料"
-        f"\n   股票數：{len(stock_ids)}"
-        f"\n   起始日：{start}"
-        f"\n   增量模式：{'否（強制重新下載）' if force else '是'}"
-        f"\n   並行度：{workers}"
-    )
+        success, fail, skip, total_rows = 0, 0, 0, 0
+        failed_stocks = []
+        start_time = time.time()
 
-    success, fail, skip, total_rows = 0, 0, 0, 0
-    failed_stocks = []
-    start_time = time.time()
+        # 並行下載（沒有完整休眠/恢復機制，見上方 docstring）
+        if workers > 1:
+            quota_exhausted_count = 0
+            aborted = False
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(download_one, sid, db_path, token, start, force): sid
+                    for sid in stock_ids
+                }
 
-    # 並行下載
-    if workers > 1:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(download_one, sid, db_path, token, start, force): sid
-                for sid in stock_ids
-            }
-            
-            for i, future in enumerate(as_completed(futures), 1):
-                sid = futures[future]
+                for i, future in enumerate(as_completed(futures), 1):
+                    sid = futures[future]
+                    try:
+                        result = future.result(timeout=300)
+                        status = result.get("status")
+                        rows = result.get("rows", 0)
+
+                        if status == "ok":
+                            success += 1
+                            total_rows += rows
+                            logger.debug(f"  [{sid}] ✓ {rows} 筆")
+                        elif status in ("up_to_date", "no_data"):
+                            skip += 1
+                        elif status == "quota_exhausted":
+                            quota_exhausted_count += 1
+                            fail += 1  # 算進 fail，不是 skip——之後需要重跑，不是真的沒資料
+                            failed_stocks.append(sid)
+                        else:
+                            fail += 1
+                            failed_stocks.append(sid)
+
+                        if i % 20 == 0:
+                            logger.info(
+                                f"  進度 {i}/{len(stock_ids)} "
+                                f"✓{success} ✗{fail} ⊘{skip} (共 {total_rows:,} 筆)"
+                            )
+
+                        if not aborted and i >= 20 and quota_exhausted_count / i > 0.3:
+                            logger.error(
+                                f"❌ 並行模式偵測到配額用盡比例過高"
+                                f"（{quota_exhausted_count}/{i}），提早中止，避免繼續空轉。"
+                                f"已成功的部分已寫入資料庫。"
+                                f"建議改用 python run.py --step 1b --workers 1"
+                                f"（單一 process 順序模式，有完整的自動休眠/恢復機制）"
+                                f"從 checkpoint 續跑。"
+                            )
+                            aborted = True
+                            for f in futures:
+                                f.cancel()
+                            break
+
+                    except Exception as e:
+                        fail += 1
+                        failed_stocks.append(sid)
+                        logger.warning(f"  [{sid}] ✗ 異常：{e}")
+
+            if aborted:
+                return
+        else:
+            # 順序下載：完整的自動休眠/恢復機制
+            quota_cycle = 0
+            last_heartbeat = time.time()
+            i = 0
+            while i < len(stock_ids):
+                sid = stock_ids[i]
                 try:
-                    result = future.result(timeout=300)
+                    result = download_one(sid, db_path, token, start, force)
                     status = result.get("status")
                     rows = result.get("rows", 0)
-                    
+
+                    if status == "quota_exhausted":
+                        quota_cycle += 1
+                        if quota_cycle > MAX_QUOTA_RETRY_CYCLES:
+                            logger.error(
+                                f"❌ 已嘗試 {MAX_QUOTA_RETRY_CYCLES} 個整點週期仍配額不足，"
+                                f"需要人工確認。已處理 {i}/{len(stock_ids)} 檔（成功 {success}）。"
+                                f"執行 python run.py --step 1b 可從 checkpoint 續跑。"
+                            )
+                            return
+                        wake_at = _next_hour_boundary() + timedelta(seconds=5)
+                        logger.warning(
+                            f"⏸️  額度耗盡於 {datetime.now():%H:%M:%S}，"
+                            f"已處理 {i}/{len(stock_ids)} 檔，將於 {wake_at:%H:%M:%S} "
+                            f"自動恢復（第 {quota_cycle}/{MAX_QUOTA_RETRY_CYCLES} 次）"
+                        )
+                        sleep_with_heartbeat(wake_at, i, len(stock_ids))
+                        with _rate_limiter.lock:
+                            _rate_limiter.request_times.clear()
+                        logger.info(f"▶️  已恢復，從第 {i + 1} 檔繼續")
+                        continue  # 不移動 i，重試同一檔
+
                     if status == "ok":
                         success += 1
                         total_rows += rows
-                        logger.debug(f"  [{sid}] ✓ {rows} 筆")
-                    elif status == "up_to_date":
-                        skip += 1
-                    elif status == "no_data":
+                    elif status in ("up_to_date", "no_data"):
                         skip += 1
                     else:
                         fail += 1
                         failed_stocks.append(sid)
-                    
-                    if i % 20 == 0:
-                        logger.info(
-                            f"  進度 {i}/{len(stock_ids)} "
-                            f"✓{success} ✗{fail} ⊘{skip} (共 {total_rows:,} 筆)"
-                        )
-                        
+
                 except Exception as e:
                     fail += 1
                     failed_stocks.append(sid)
                     logger.warning(f"  [{sid}] ✗ 異常：{e}")
-    else:
-        # 順序下載
-        for i, sid in enumerate(stock_ids, 1):
-            try:
-                result = download_one(sid, db_path, token, start, force)
-                status = result.get("status")
-                rows = result.get("rows", 0)
-                
-                if status == "ok":
-                    success += 1
-                    total_rows += rows
-                elif status in ["up_to_date", "no_data"]:
-                    skip += 1
-                else:
-                    fail += 1
-                    failed_stocks.append(sid)
-                
+
+                quota_cycle = 0
+                i += 1
+
                 if i % 20 == 0:
                     logger.info(
                         f"  進度 {i}/{len(stock_ids)} "
                         f"✓{success} ✗{fail} ⊘{skip} (共 {total_rows:,} 筆)"
                     )
-                    
-            except Exception as e:
-                fail += 1
-                failed_stocks.append(sid)
-                logger.warning(f"  [{sid}] ✗ 異常：{e}")
+                if time.time() - last_heartbeat > 600:
+                    logger.info(f"💓 心跳：{i}/{len(stock_ids)} 檔，✓{success} ⊘{skip} ✗{fail}")
+                    last_heartbeat = time.time()
 
-            # 注意：不需在這裡 sleep。RateLimiter.acquire() 已在每次 API 呼叫前
-            # 動態 sleep（依當前 quota 狀況）。多此一舉的 sleep 會拖慢下載。
+                # 注意：不需要額外 sleep。RateLimiter.acquire() 已在每次 API 呼叫前
+                # 動態 sleep（依當前 quota 狀況）。多此一舉的 sleep 會拖慢下載。
 
     elapsed = time.time() - start_time
 

@@ -7,13 +7,24 @@ download_supplementary.py
   TaiwanStockPrice, data_id="TAIEX"  → market_index（大盤指數）
 
 三大法人買賣超（institutional_investors）已經有專屬的
-data_pipeline/download_institutional.py 在維護（斷點續傳/並行/配額都已完成，
-且資料已達 Task 1 驗收標準），這裡不重複實作，避免同一份邏輯有兩套實作。
+data_pipeline/download_institutional.py 在維護，這裡不重複實作。
 
-速率控制（照 CLAUDE_CODE_TASKS.md Task 1b 規格，跟 download_institutional.py
-的動態配額演算法不同，這裡用文件指定的固定節奏）：
-  - 每次 API 呼叫固定 sleep 0.5 秒
-  - 同一個「整點時段」內累積滿 550 次呼叫 → 休眠到下個整點
+事故後重寫的三個修正（詳見 docs/PROJECT_STATUS.md 的診斷紀錄）：
+  1. 互斥鎖（download_lock.py）：同一時間只允許一個下載程序使用 FINMIND_TOKEN，
+     避免多個 process 各自以為自己有完整配額，加總超過帳號實際上限。
+  2. 402 判定修正：原本 resp.raise_for_status() 會在檢查 JSON status 欄位之前
+     先對 HTTP 402 拋出例外，導致「配額用盡」被 generic 的 HTTPError 分支接住，
+     只做幾秒鐘的重試就放棄、被上層誤判成「沒有資料」。現在直接檢查
+     resp.status_code == 402，並用專屬的 QuotaExhaustedError 往上傳，
+     跟「200 但真的没資料」的空 DataFrame 明確分開。
+  3. 402 不重試、改成休眠到下個時間窗口自動恢復：偵測到配額用盡就記錄目前的
+     checkpoint、計算距離下個整點還有多久、sleep 到那個時間點自動醒來繼續
+     （期間定期印心跳 log），不需要人重新執行指令。連續 3 個時間窗口醒來後
+     立刻又用盡，才視為異常，正常結束 process 並提示需要人工確認。
+
+速率控制（0.5s/call，同一時間窗口內滿 550 次後主動休眠）用 RateLimiter，
+時間窗口長度可調（預設 3600 秒＝1 小時，測試時可以調成幾十秒驗證
+休眠/恢復邏輯，不用真的等一小時）。
 
 使用方式：
   python download_supplementary.py                  ← 下載全部（增量，融資+TAIEX）
@@ -48,6 +59,8 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent))
 from schema import TABLE_DDL, TABLE_INDEXES
+from download_lock import download_lock
+from finmind_common import QuotaExhaustedError, MAX_QUOTA_RETRY_CYCLES, sleep_with_heartbeat
 
 # ── 設定 ──────────────────────────────────────────────────────
 DB_PATH        = "data/taiwan_stock.db"
@@ -57,55 +70,76 @@ DATASET_PRICE  = "TaiwanStockPrice"
 INDEX_ID       = "TAIEX"
 DEFAULT_START  = "2015-01-01"
 
-PER_CALL_SLEEP = 0.5   # 秒/次
-HOURLY_LIMIT   = 550   # 每個整點時段的呼叫上限
+PER_CALL_SLEEP = 0.5     # 秒/次
+HOURLY_LIMIT   = 550     # 每個時間窗口的呼叫上限
+WINDOW_SECONDS = 3600    # 時間窗口長度（預設 1 小時；測試時可調小）
 
 
 # ══════════════════════════════════════════════════════════════
-# 固定節奏速率限制器（0.5s/call，每小時 550 次後 sleep 到整點）
+# 固定節奏速率限制器（0.5s/call，時間窗口內滿 550 次後主動休眠）
 # ══════════════════════════════════════════════════════════════
 
-class SimpleRateLimiter:
+class RateLimiter:
     """
-    每次呼叫固定 sleep PER_CALL_SLEEP 秒；若同一個整點時段內已呼叫滿
-    HOURLY_LIMIT 次，就睡到下一個整點才繼續（比 download_institutional.py
-    的動態配額演算法更保守、也更貼近任務書字面規格）。
+    每次呼叫固定 sleep per_call_sleep 秒；同一個時間窗口內已呼叫滿
+    limit 次，就主動睡到下一個窗口邊界（而不是等撞到 402 才知道）。
+
+    window_seconds 預設 3600（對齊到整點），測試時可以調小（例如 20 秒）
+    搭配調低 limit，在幾十秒內就能驗證完整的休眠/恢復流程。
     """
 
     def __init__(self, per_call_sleep: float = PER_CALL_SLEEP,
-                 hourly_limit: int = HOURLY_LIMIT):
+                 limit: int = HOURLY_LIMIT, window_seconds: int = WINDOW_SECONDS):
         self.per_call_sleep = per_call_sleep
-        self.hourly_limit   = hourly_limit
-        self.call_count     = 0
-        self.hour_start     = self._current_hour()
+        self.limit = limit
+        self.window_seconds = window_seconds
+        self.call_count = 0
+        self.window_start = self._current_window()
 
-    @staticmethod
-    def _current_hour() -> datetime:
-        return datetime.now().replace(minute=0, second=0, microsecond=0)
+    def _current_window(self) -> float:
+        now = time.time()
+        return now - (now % self.window_seconds)
+
+    def next_window_start(self) -> float:
+        return self.window_start + self.window_seconds
+
+    def reset_window(self) -> None:
+        """外部（休眠恢復後）呼叫，強制重新對齊到目前的時間窗口。"""
+        self.window_start = self._current_window()
+        self.call_count = 0
 
     def acquire(self) -> None:
-        now_hour = self._current_hour()
-        if now_hour != self.hour_start:
-            self.hour_start = now_hour
-            self.call_count = 0
+        now = time.time()
+        if now - self.window_start >= self.window_seconds:
+            self.reset_window()
 
-        if self.call_count >= self.hourly_limit:
-            next_hour = self.hour_start + timedelta(hours=1)
-            wait = (next_hour - datetime.now()).total_seconds()
+        if self.call_count >= self.limit:
+            wait = self.next_window_start() - time.time()
             if wait > 0:
                 logger.warning(
-                    f"⚠️  本小時已呼叫 {self.call_count} 次（上限 {self.hourly_limit}），"
-                    f"休眠 {wait:.0f} 秒至 {next_hour:%H:%M}..."
+                    f"⚠️  本時間窗口已呼叫 {self.call_count} 次（上限 {self.limit}），"
+                    f"主動休眠 {wait:.0f} 秒..."
                 )
-                time.sleep(wait + 1)
-            self.hour_start = self._current_hour()
-            self.call_count = 0
+                time.sleep(wait + 0.5)
+            self.reset_window()
 
         time.sleep(self.per_call_sleep)
         self.call_count += 1
 
 
-_rate_limiter = SimpleRateLimiter()
+_rate_limiter = RateLimiter()
+
+
+def _hibernate_until_next_window(processed: int, total: int, cycle: int) -> None:
+    """遇到配額用盡時呼叫：印出清楚訊息、休眠到下個時間窗口、恢復限速器狀態。"""
+    wake_at = datetime.fromtimestamp(_rate_limiter.next_window_start()) + timedelta(seconds=5)
+    logger.warning(
+        f"⏸️  額度耗盡於 {datetime.now():%H:%M:%S}，已處理 {processed}/{total} 檔，"
+        f"將於 {wake_at:%H:%M:%S} 自動恢復（第 {cycle}/{MAX_QUOTA_RETRY_CYCLES} 次）"
+    )
+    sleep_with_heartbeat(wake_at, processed, total)
+    _rate_limiter.reset_window()
+    logger.info(f"▶️  已恢復，從第 {processed + 1} 檔繼續")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -113,12 +147,19 @@ _rate_limiter = SimpleRateLimiter()
 # ══════════════════════════════════════════════════════════════
 
 def init_tables(db_path: str) -> None:
-    """建立 margin_trading / market_index（沿用 schema.py 的單一事實來源）。"""
+    """
+    建立 margin_trading / market_index（沿用 schema.py 的單一事實來源）。
+
+    只建立這兩張表自己的索引，不要把 TABLE_INDEXES 整包跑過去——那個清單
+    也包含 daily_price、institutional_investors 等表的索引，這個檔案沒有
+    責任、也不該假設那些表一定存在（例如針對這兩張表做隔離測試時）。
+    """
     with sqlite3.connect(db_path) as conn:
         conn.execute(TABLE_DDL["margin_trading"])
         conn.execute(TABLE_DDL["market_index"])
         for idx in TABLE_INDEXES:
-            conn.execute(idx)
+            if "margin_trading" in idx or "market_index" in idx:
+                conn.execute(idx)
     logger.info("margin_trading / market_index 資料表已確認存在")
 
 
@@ -128,7 +169,15 @@ def init_tables(db_path: str) -> None:
 
 def _fetch(dataset: str, data_id: str, start_date: str, end_date: str,
            token: str, retries: int = 3) -> pd.DataFrame:
-    """通用 FinMind 呼叫：固定節奏速率限制 + 3 次重試 + 402 特殊處理。"""
+    """
+    通用 FinMind 呼叫。
+
+    402（HTTP 狀態碼或 JSON status 欄位）一律視為配額用盡，立刻拋出
+    QuotaExhaustedError，不重試——由呼叫端決定要不要休眠等待。
+    其他錯誤（timeout、5xx、連線異常）維持 3 次重試 + 指數退避。
+    回傳空 DataFrame 現在只代表一種情況：FinMind 明確回應「有資料但是空的」，
+    是合法結果，不是失敗。
+    """
     params = {
         "dataset":    dataset,
         "data_id":    data_id,
@@ -141,28 +190,29 @@ def _fetch(dataset: str, data_id: str, start_date: str, end_date: str,
         _rate_limiter.acquire()
         try:
             resp = requests.get(FINMIND_URL, params=params, timeout=30)
+
+            # 檢查真正的 HTTP 402 狀態碼，必須在 raise_for_status() 之前，
+            # 否則 raise_for_status() 會先把它變成 generic HTTPError，
+            # 402 就跟其他 HTTP 錯誤混在一起被當成暫時性問題重試。
+            if resp.status_code == 402:
+                raise QuotaExhaustedError(data_id)
+
             resp.raise_for_status()
             payload = resp.json()
             status = payload.get("status")
 
-            if status == 200 and payload.get("data"):
-                return pd.DataFrame(payload["data"])
-
             if status == 402:
-                logger.warning(
-                    f"    [{data_id}] FinMind 402（配額用盡，attempt {attempt}/{retries}），"
-                    f"休眠至下個整點..."
-                )
-                next_hour = _rate_limiter.hour_start + timedelta(hours=1)
-                wait = max(60.0, (next_hour - datetime.now()).total_seconds() + 1)
-                time.sleep(wait)
-                _rate_limiter.hour_start = _rate_limiter._current_hour()
-                _rate_limiter.call_count = 0
-                continue
+                # 保留：以防 FinMind 未來改成 HTTP 200 + JSON status:402 的格式
+                raise QuotaExhaustedError(data_id)
 
-            # 無資料或其他訊息（非致命）
+            if status == 200:
+                return pd.DataFrame(payload.get("data") or [])
+
             logger.debug(f"    [{data_id}] 無新資料或訊息：{payload.get('message', '')}")
             return pd.DataFrame()
+
+        except QuotaExhaustedError:
+            raise
 
         except requests.exceptions.Timeout:
             logger.warning(f"    [{data_id}] Timeout（attempt {attempt}/{retries}），重試...")
@@ -235,6 +285,14 @@ def _upsert_margin(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
 
 def download_margin_one(stock_id: str, db_path: str, token: str,
                          start: str = DEFAULT_START, force: bool = False) -> Dict[str, object]:
+    """
+    下載單一股票的融資融券資料。status 可能是：
+      "ok"              成功寫入新資料
+      "up_to_date"      checkpoint 已經是最新，不用抓
+      "no_data"         FinMind 明確回應「有資料但是空的」（例如興櫃股/全額交割股沒有信用交易）
+      "quota_exhausted" 402 配額用盡，需要呼叫端休眠後重試——跟 no_data 明確分開，
+                        不能被算成「正常跳過」
+    """
     today = date.today().strftime("%Y-%m-%d")
     result = {"stock_id": stock_id, "rows": 0, "status": "ok"}
 
@@ -245,7 +303,12 @@ def download_margin_one(stock_id: str, db_path: str, token: str,
         result["status"] = "up_to_date"
         return result
 
-    df = _fetch(DATASET_MARGIN, stock_id, start_date, today, token)
+    try:
+        df = _fetch(DATASET_MARGIN, stock_id, start_date, today, token)
+    except QuotaExhaustedError:
+        result["status"] = "quota_exhausted"
+        return result
+
     if df.empty:
         result["status"] = "no_data"
         return result
@@ -308,6 +371,7 @@ def _upsert_index(conn: sqlite3.Connection, df: pd.DataFrame, index_id: str = IN
 
 def download_index(db_path: str, token: str, start: str = DEFAULT_START,
                     force: bool = False, index_id: str = INDEX_ID) -> Dict[str, object]:
+    """跟 download_margin_one 一樣，status 多了 "quota_exhausted"，跟 no_data 明確分開。"""
     today = date.today().strftime("%Y-%m-%d")
     result = {"index_id": index_id, "rows": 0, "status": "ok"}
 
@@ -318,7 +382,12 @@ def download_index(db_path: str, token: str, start: str = DEFAULT_START,
         result["status"] = "up_to_date"
         return result
 
-    df = _fetch(DATASET_PRICE, index_id, start_date, today, token)
+    try:
+        df = _fetch(DATASET_PRICE, index_id, start_date, today, token)
+    except QuotaExhaustedError:
+        result["status"] = "quota_exhausted"
+        return result
+
     if df.empty:
         result["status"] = "no_data"
         return result
@@ -343,11 +412,116 @@ def get_stock_list(db_path: str) -> List[str]:
     return [r[0] for r in rows]
 
 
+def _download_taiex(db_path: str, token: str, start: str, force: bool) -> bool:
+    """回傳 True 表示正常結束（含用盡重試上限後放棄），False 表示應該中止整個流程。"""
+    cycle = 0
+    while True:
+        result = download_index(db_path, token, start, force)
+        if result["status"] != "quota_exhausted":
+            logger.info(f"   TAIEX：{result['status']}，新增 {result['rows']} 筆")
+            return True
+
+        cycle += 1
+        if cycle > MAX_QUOTA_RETRY_CYCLES:
+            logger.error(
+                f"❌ TAIEX 下載已嘗試 {MAX_QUOTA_RETRY_CYCLES} 個時間窗口仍配額不足，"
+                f"需要人工確認。可執行 python run.py --step 1b 從 checkpoint 續跑。"
+            )
+            return False
+        _hibernate_until_next_window(processed=0, total=1, cycle=cycle)
+
+
+def _download_margin_all(db_path: str, token: str, start: str, force: bool,
+                          sid_filter: Optional[str]) -> None:
+    stock_ids = [sid_filter] if sid_filter else get_stock_list(db_path)
+    if not stock_ids:
+        logger.error("❌ load_manifest 為空！請先執行：python run.py --step 1")
+        return
+
+    logger.info(
+        f"📥 開始下載融資融券資料"
+        f"\n   股票數：{len(stock_ids)}"
+        f"\n   起始日：{start}"
+        f"\n   增量模式：{'否（強制重新下載）' if force else '是'}"
+    )
+
+    success, fail, skip, total_rows = 0, 0, 0, 0
+    failed_stocks: List[str] = []
+    start_time = time.time()
+    last_heartbeat = time.time()
+    quota_cycle = 0
+
+    pbar = tqdm(total=len(stock_ids), desc="融資融券", unit="檔")
+    i = 0
+    try:
+        while i < len(stock_ids):
+            sid = stock_ids[i]
+            try:
+                result = download_margin_one(sid, db_path, token, start, force)
+                status = result["status"]
+
+                if status == "quota_exhausted":
+                    quota_cycle += 1
+                    if quota_cycle > MAX_QUOTA_RETRY_CYCLES:
+                        logger.error(
+                            f"❌ 已嘗試 {MAX_QUOTA_RETRY_CYCLES} 個時間窗口仍配額不足，需要人工確認。"
+                            f"已處理 {i}/{len(stock_ids)} 檔（成功 {success}）。"
+                            f"執行 python run.py --step 1b 可從 checkpoint 續跑。"
+                        )
+                        return
+                    _hibernate_until_next_window(processed=i, total=len(stock_ids), cycle=quota_cycle)
+                    continue  # 不移動 i，重試同一檔
+
+                if status == "ok":
+                    success += 1
+                    total_rows += result["rows"]
+                elif status in ("up_to_date", "no_data"):
+                    skip += 1
+                else:
+                    fail += 1
+                    failed_stocks.append(sid)
+
+            except Exception as e:
+                fail += 1
+                failed_stocks.append(sid)
+                logger.warning(f"  [{sid}] ✗ 異常：{e}")
+
+            quota_cycle = 0
+            i += 1
+            pbar.update(1)
+
+            if time.time() - last_heartbeat > 600:
+                logger.info(f"💓 心跳：{i}/{len(stock_ids)} 檔，✓{success} ⊘{skip} ✗{fail}")
+                last_heartbeat = time.time()
+    finally:
+        pbar.close()
+
+    elapsed = time.time() - start_time
+
+    with sqlite3.connect(db_path) as conn:
+        total_count, distinct_stocks = conn.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT stock_id) FROM margin_trading"
+        ).fetchone()
+
+    logger.info(
+        f"\n✅ 融資融券下載完成"
+        f"\n   耗時：{elapsed:.1f}s"
+        f"\n   新增：{total_rows:,} 筆"
+        f"\n   統計：{distinct_stocks} 檔股票，共 {total_count:,} 筆記錄"
+        f"\n   成功：{success} / 失敗：{fail} / 跳過（含真無資料）：{skip}"
+    )
+    if failed_stocks:
+        logger.warning(f"⚠️  失敗的股票（{len(failed_stocks)}）：{', '.join(failed_stocks[:10])}")
+
+
 def download_all_supplementary(db_path: str, token: str, start: str = DEFAULT_START,
                                 force: bool = False, sid_filter: Optional[str] = None,
                                 skip_margin: bool = False, skip_index: bool = False) -> None:
     """
     下載 margin_trading（融資融券）與 market_index（TAIEX）。
+
+    全程持有 download_lock（見 download_lock.py）：同一時間只允許一個下載
+    程序執行，避免多個 process 各自以為自己有完整的 FINMIND_TOKEN 配額。
 
     Parameters
     ----------
@@ -359,66 +533,17 @@ def download_all_supplementary(db_path: str, token: str, start: str = DEFAULT_ST
     skip_margin : 跳過融資融券下載
     skip_index  : 跳過 TAIEX 下載
     """
-    init_tables(db_path)
+    with download_lock("download_supplementary.py"):
+        init_tables(db_path)
 
-    # ── TAIEX（大盤指數，1 檔，成本很低，不受 --sid 影響）──
-    if not skip_index:
-        logger.info("📈 下載大盤指數 TAIEX...")
-        result = download_index(db_path, token, start, force)
-        logger.info(f"   TAIEX：{result['status']}，新增 {result['rows']} 筆")
+        if not skip_index:
+            logger.info("📈 下載大盤指數 TAIEX...")
+            ok = _download_taiex(db_path, token, start, force)
+            if not ok:
+                return
 
-    # ── margin_trading（融資融券，逐股下載）──
-    if not skip_margin:
-        stock_ids = [sid_filter] if sid_filter else get_stock_list(db_path)
-        if not stock_ids:
-            logger.error("❌ load_manifest 為空！請先執行：python run.py --step 1")
-            return
-
-        logger.info(
-            f"📥 開始下載融資融券資料"
-            f"\n   股票數：{len(stock_ids)}"
-            f"\n   起始日：{start}"
-            f"\n   增量模式：{'否（強制重新下載）' if force else '是'}"
-        )
-
-        success, fail, skip, total_rows = 0, 0, 0, 0
-        failed_stocks = []
-        start_time = time.time()
-
-        for sid in tqdm(stock_ids, desc="融資融券", unit="檔"):
-            try:
-                result = download_margin_one(sid, db_path, token, start, force)
-                status = result["status"]
-                rows = result["rows"]
-                if status == "ok":
-                    success += 1
-                    total_rows += rows
-                elif status in ("up_to_date", "no_data"):
-                    skip += 1
-                else:
-                    fail += 1
-                    failed_stocks.append(sid)
-            except Exception as e:
-                fail += 1
-                failed_stocks.append(sid)
-                logger.warning(f"  [{sid}] ✗ 異常：{e}")
-
-        elapsed = time.time() - start_time
-
-        with sqlite3.connect(db_path) as conn:
-            total_count, distinct_stocks = conn.execute(
-                "SELECT COUNT(*), COUNT(DISTINCT stock_id) FROM margin_trading"
-            ).fetchone()
-
-        logger.info(
-            f"\n✅ 融資融券下載完成"
-            f"\n   耗時：{elapsed:.1f}s"
-            f"\n   新增：{total_rows:,} 筆"
-            f"\n   統計：{distinct_stocks} 檔股票，共 {total_count:,} 筆記錄"
-            f"\n   成功：{success} / 失敗：{fail} / 跳過：{skip}"
-        )
-        if failed_stocks:
-            logger.warning(f"⚠️  失敗的股票（{len(failed_stocks)}）：{', '.join(failed_stocks[:10])}")
+        if not skip_margin:
+            _download_margin_all(db_path, token, start, force, sid_filter)
 
 
 # ══════════════════════════════════════════════════════════════
