@@ -35,7 +35,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "data_pipeline"))
 # ── 引入同資料夾和 data_pipeline 的模組 ──────────────────────
 from data_pipeline.loader import CSVLoader
 from data_pipeline.download_institutional import download_all as download_institutional_all
-from notifier import notify_all
 
 # ── 設定 ──────────────────────────────────────────────────────
 # 使用絕對路徑以避免相對路徑問題（無論從哪個目錄執行都能找到）
@@ -490,30 +489,3 @@ if __name__ == "__main__":
     # 訊號生成請改用 predict_model.py（N1 v2 ML 最終策略）。
     logger.info("\n✅ 資料更新完成。產生最新訊號請執行：python predict_model.py")
     logger.info(f"\n✅ 每日更新完成：{today}")
-    return  # ← 跳過下面的舊訊號邏輯
-
-    # ─────────── 以下是舊邏輯，已停用 ───────────────────
-    # Step 2：計算今日訊號（舊 Layer 2，已棄用）
-    logger.info("\n🧠 Step 2：計算今日持倉訊號...")
-    data    = load_matrices_for_signal(DB_PATH)
-    signals, stats = generate_signals(data)
-
-    # Step 3：儲存訊號（會覆蓋 predict_model.py 的好訊號 → 已停用）
-    logger.info("\n💾 Step 3：儲存訊號...")
-    save_signals(signals, stats, today)
-
-    # Step 4：發送通知
-    notify_all(signals, stats, today)
-
-    logger.info(f"\n✅ 每日更新完成：{today}")
-
-    # 印出摘要
-    holds = [s for s in signals if s["action"] in ("BUY","HOLD")]
-    sells = [s for s in signals if s["action"] == "SELL"]
-    buys  = [s for s in signals if s["action"] == "BUY"]
-    print(f"\n  今日持倉 {len(holds)} 檔：{[s['stock_id'] for s in holds]}")
-    if buys:  print(f"  🆕 買入：{[s['stock_id'] for s in buys]}")
-    if sells: print(f"  🔴 賣出：{[s['stock_id'] for s in sells]}")
-    print(f"  年化報酬：{stats.get('annual_return')}  "
-          f"Sharpe：{stats.get('sharpe')}  "
-          f"最大回撤：{stats.get('max_drawdown')}")
