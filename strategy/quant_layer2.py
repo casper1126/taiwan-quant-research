@@ -16,6 +16,10 @@ import numpy as np
 import pandas as pd
 from pandas.tseries.offsets import DateOffset
 
+from factors import base as factor_base
+from factors import style as factor_style
+from factors import taiwan as factor_taiwan
+
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 # ── 設定（修改這裡調整策略參數） ──────────────────────────────
@@ -95,19 +99,57 @@ def load_matrices(db_path: str, start: str, end: str) -> Dict[str, pd.DataFrame]
         # 資料表不存在時（Layer 1 未下載籌碼資料），用空 DataFrame
         inst_matrix = pd.DataFrame()
 
+    # 融資融券（margin_trading，Task 1 新增，可能還在回填中）
+    # margin_balance：個股融資餘額寬格式矩陣（給 margin_usage 用）
+    # margin_total：全市場融資餘額加總（給 margin_squeeze_market 用）
+    try:
+        margin_df = pd.read_sql(
+            f"SELECT date, stock_id, margin_balance FROM margin_trading "
+            f"WHERE date BETWEEN ? AND ? ORDER BY date",
+            conn, params=(start, end), parse_dates=["date"],
+        )
+        if not margin_df.empty:
+            margin_balance_matrix = margin_df.pivot(
+                index="date", columns="stock_id", values="margin_balance"
+            )
+            margin_total_series = margin_balance_matrix.sum(axis=1, min_count=1)
+        else:
+            margin_balance_matrix = pd.DataFrame()
+            margin_total_series = pd.Series(dtype=float)
+    except Exception:
+        margin_balance_matrix = pd.DataFrame()
+        margin_total_series = pd.Series(dtype=float)
+
+    # TAIEX 大盤指數（market_index，Task 1 新增）
+    try:
+        index_df = pd.read_sql(
+            f"SELECT date, close FROM market_index WHERE index_id = 'TAIEX' "
+            f"AND date BETWEEN ? AND ? ORDER BY date",
+            conn, params=(start, end), parse_dates=["date"],
+        )
+        index_close_series = (
+            index_df.set_index("date")["close"] if not index_df.empty
+            else pd.Series(dtype=float)
+        )
+    except Exception:
+        index_close_series = pd.Series(dtype=float)
+
     conn.close()
 
     def wide(df, col):
         return df.pivot(index="date", columns="stock_id", values=col)
 
     data = {
-        "close":         wide(price_df, "close"),
-        "volume":        wide(price_df, "volume"),
-        "PER":           wide(val_df,   "PER"),
-        "PBR":           wide(val_df,   "PBR"),
-        "div_yld":       wide(val_df,   "dividend_yield"),
-        "revenue":       wide(rev_df,   "revenue"),
-        "institutional": inst_matrix,   # 新增籌碼因子資料
+        "close":          wide(price_df, "close"),
+        "volume":         wide(price_df, "volume"),
+        "PER":            wide(val_df,   "PER"),
+        "PBR":            wide(val_df,   "PBR"),
+        "div_yld":        wide(val_df,   "dividend_yield"),
+        "revenue":        wide(rev_df,   "revenue"),
+        "institutional":  inst_matrix,          # 籌碼因子資料
+        "margin_balance": margin_balance_matrix, # 融資融券（個股）
+        "margin_total":   margin_total_series,   # 融資融券（全市場加總）
+        "index_close":    index_close_series,    # TAIEX 收盤價
     }
 
     n_stocks = data["close"].shape[1]
@@ -147,14 +189,17 @@ def build_rev_yoy(rev_matrix: pd.DataFrame,
 
 def build_factors(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     """
-    建構所有因子（v5 最終版）。
+    建構所有因子（v6：因子數學邏輯搬到 strategy/factors/ 模組，
+    這裡只負責投資宇宙篩選、呼叫因子函式、套用流動性遮罩）。
 
     ── 因子清單 ──────────────────────────────────────────────
-    ① 52 週新高動能   George & Hwang (2004)
-    ② 價值（1/PER）   Fama-French (1992)
-    ③ 月營收 YoY      台股獨有，40 天延遲處理
-    ④ 低波動 IVOL     Frazzini & Pedersen (2014)
-    ⑤ 籌碼因子        外資 + 投信累積買超（台股最強因子）
+    ① 52 週新高動能   George & Hwang (2004)             → factors/style.py
+    ② 價值 0.5/PER+0.5/PBR  Fama-French (1992)          → factors/style.py
+    ③ 月營收 YoY      台股獨有，40 天延遲處理             → build_rev_yoy（本檔）
+    ④ 低波動 IVOL     Frazzini & Pedersen (2014)         → factors/style.py
+    ⑤ 籌碼因子        外資 + 投信買超 / 60日成交金額正規化 → factors/taiwan.py
+    ⑥ 融資使用率      算出來供診斷/測試，暫不進複合         → factors/taiwan.py
+    ⑦ 品質            佔位（缺財報資料）                   → factors/taiwan.py
 
     ── 投資宇宙篩選（修正版）────────────────────────────────
     使用「日均成交金額」= volume × close 排名前 300。
@@ -189,50 +234,34 @@ def build_factors(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     close_liquid = close.where(liquid_mask, np.nan)
     PER_liquid   = PER.where(liquid_mask, np.nan)
 
+    # factors/ 模組吃的 data 字典：用清理過的 close/volume 覆蓋掉原始版本
+    factor_data = {**data, "close": close, "volume": volume}
+
     # ① 52 週新高動能
-    high_252     = close.rolling(252, min_periods=60).max()
-    momentum_52w = (close_liquid / high_252).where(liquid_mask, np.nan)
+    momentum_52w = factor_style.momentum_52w(factor_data).where(liquid_mask, np.nan)
 
     # 補充：120 日（約 6 個月）報酬動能（增加短中期動能訊號）
     mom_120 = close_liquid.pct_change(120)
 
-    # ② 價值因子：1/PER
-    value = (1.0 / PER_liquid).replace([np.inf, -np.inf], np.nan)
+    # ② 價值因子：0.5/PER + 0.5/PBR
+    value = factor_style.value_composite(factor_data).where(liquid_mask, np.nan)
 
     # ③ 月營收 YoY（已在 build_rev_yoy 處理 40 天延遲）
     rev_yoy = build_rev_yoy(data["revenue"], close.index)
     rev_yoy = rev_yoy.where(liquid_mask, np.nan)
 
     # ④ 低波動因子：60 日 IVOL 倒數
-    daily_ret = close_liquid.pct_change()
-    ivol_60   = daily_ret.rolling(60, min_periods=20).std()
-    low_vol   = (1.0 / ivol_60).replace([np.inf, -np.inf], np.nan)
+    low_vol = factor_style.low_vol_ivol(factor_data).where(liquid_mask, np.nan)
 
-    # ⑤ 籌碼因子：外資 + 投信累積買超（最強台股因子）
-    # ─────────────────────────────────────────────────────────
-    # 邏輯：外資和投信是台股最有訊息優勢的機構投資人。
-    #   連續買超 = 對基本面有信心，通常有超額報酬。
-    #   用「過去 60 個交易日」的累積買超金額。
-    #
-    # 資料來源：FinMind TaiwanStockInstitutionalInvestorsBuySell
-    # （本版先用 dummy，等你串接 FinMind 籌碼資料後替換）
-    #
-    # 資料欄位格式：
-    #   institutional_matrix : 寬格式 DataFrame
-    #   index = date, columns = stock_id, value = 外資+投信淨買超(元)
-    inst_raw = data.get("institutional")
-    if inst_raw is not None and not inst_raw.empty:
-        inst_aligned = inst_raw.reindex(
-            index=close.index, columns=close.columns
-        ).fillna(0.0)
-        # 60 日累積買超，正值 = 持續買進
-        inst_flow_60 = inst_aligned.rolling(60, min_periods=10).sum()
-        inst_flow    = inst_flow_60.where(liquid_mask, np.nan)
-    else:
-        # 籌碼資料尚未載入時，用 NaN 佔位（不影響其他因子）
-        inst_flow = pd.DataFrame(
-            np.nan, index=close.index, columns=close.columns
-        )
+    # ⑤ 籌碼因子：外資 + 投信買超 / 60 日平均成交金額（正規化，最強台股因子）
+    inst_flow = factor_taiwan.inst_flow(factor_data).where(liquid_mask, np.nan)
+
+    # ⑥ 融資使用率因子：算出來供診斷/單元測試使用，
+    #    依 Task 2c 規格暫不進複合權重（build_positions() 的 factor_map 不含它）
+    margin_usage = factor_taiwan.margin_usage(factor_data).where(liquid_mask, np.nan)
+
+    # ⑦ 品質因子（佔位，回傳 NaN）
+    quality = factor_taiwan.quality(factor_data)
 
     # ── 乖離率（過濾條件用，不直接排名）────────────────────
     bias = (close - close.rolling(20).mean()) / close.rolling(20).mean()
@@ -248,7 +277,9 @@ def build_factors(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
         "value":        value,
         "rev_yoy":      rev_yoy,
         "low_vol":      low_vol,
-        "inst_flow":    inst_flow,    # 新增籌碼因子
+        "inst_flow":    inst_flow,
+        "margin_usage": margin_usage,  # 不進複合，見上方註解
+        "quality":      quality,       # 佔位，全 NaN
         "div_yld":      div_yld,
         "dollar_volume": dollar_volume,
         "bias":         bias,
@@ -417,13 +448,8 @@ def build_positions(factors: dict,
 
     # ── 合成因子（IC 加權，含籌碼）──────────────────────────
     #
-    # 因子          IC 預期   權重  說明
-    # ──────────────────────────────────────────────────────
-    # momentum      0.04      0.15  52週新高，亞洲市場有效
-    # value         0.03      0.20  1/PER，台股散戶低估价值股
-    # rev_yoy       0.025     0.20  月營收YoY，台股獨有優勢
-    # low_vol       0.03      0.15  低波動，散戶偏好高波動
-    # inst_flow     0.05      0.30  外資+投信買超，台股最強因子
+    # 因子（Task 2c 規格權重，見下方 default_weights）
+    # momentum 0.15 / value 0.20 / rev_yoy 0.20 / low_vol 0.15 / inst_flow 0.30
     #
     # 籌碼因子給最高權重（0.30），因為：
     # 1. IC 預期最高（外資有訊息優勢）
@@ -431,10 +457,9 @@ def build_positions(factors: dict,
     # 3. 資料最即時（每日公告）
     # 如果 inst_flow 全是 NaN（資料尚未載入），
     # cross_zscore 返回 0，不影響其他因子
-    def cross_zscore(m: pd.DataFrame) -> pd.DataFrame:
-        mean = m.mean(axis=1)
-        std  = m.std(axis=1).replace(0, np.nan)
-        return m.sub(mean, axis=0).div(std, axis=0).clip(-3, 3).fillna(0)
+    #
+    # cross_zscore 移到 factors/base.py（Task 2 模組化），這裡不再重複定義
+    cross_zscore = factor_base.cross_zscore
 
     # 使用歷史 IC 做動態因子權重：
     # 1) 對每個因子計算 IC 時序（IC = 因子排名 vs 未來 20 日報酬的 Spearman）
@@ -469,14 +494,20 @@ def build_positions(factors: dict,
     weights_df = ic_rolling.div(ic_rolling.sum(axis=1), axis=0)
 
     # 若某日所有因子 ic_rolling 為 0/NaN，fallback 回預設權重並排除不存在的因子
+    #
+    # 五個核心因子照 Task 2c 規格：momentum 0.15 / value 0.20 / rev_yoy 0.20 /
+    # low_vol 0.15 / inst_flow 0.30（總和 1.00）。mom_120、div_yld 是任務書
+    # 規格之外的補充因子，這裡的 fallback 權重給 0——它們仍然留在 factor_map
+    # 裡，資料充足時一樣會透過上面的動態 IC 加權機制拿到權重，只是「資料不足
+    # 時的預設值」嚴格照任務書的五因子配置，不稀釋掉。
     default_weights = {
-        "momentum": 0.14,
-        "mom_120": 0.06,
-        "value": 0.18,
-        "rev_yoy": 0.18,
-        "low_vol": 0.14,
-        "inst_flow": 0.24,
-        "div_yld": 0.06,
+        "momentum": 0.15,
+        "mom_120": 0.0,
+        "value": 0.20,
+        "rev_yoy": 0.20,
+        "low_vol": 0.15,
+        "inst_flow": 0.30,
+        "div_yld": 0.0,
     }
     # 只保留 active 因子的預設權重並正規化
     active_default = {k: default_weights[k] for k in active_factors}
