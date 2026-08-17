@@ -149,6 +149,28 @@ TABLE_DDL = {
             net           REAL,
             PRIMARY KEY (date, stock_id, investor_type)
         )""",
+
+    "margin_trading": """
+        CREATE TABLE IF NOT EXISTS margin_trading (
+            date            TEXT NOT NULL,
+            stock_id        TEXT NOT NULL,
+            margin_balance  REAL,
+            short_balance   REAL,
+            margin_change   REAL,
+            PRIMARY KEY (date, stock_id)
+        )""",
+
+    "market_index": """
+        CREATE TABLE IF NOT EXISTS market_index (
+            date        TEXT NOT NULL,
+            index_id    TEXT NOT NULL,
+            open        REAL,
+            high        REAL,
+            low         REAL,
+            close       REAL,
+            volume      REAL,
+            PRIMARY KEY (date, index_id)
+        )""",
 }
 
 TABLE_INDEXES = [
@@ -157,5 +179,9 @@ TABLE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_val_sid    ON daily_valuation(stock_id)",
     "CREATE INDEX IF NOT EXISTS idx_rev_sid    ON monthly_revenue(stock_id)",
     "CREATE INDEX IF NOT EXISTS idx_inst_sid   ON institutional_investors(stock_id)",
+    "CREATE INDEX IF NOT EXISTS idx_margin_sid  ON margin_trading(stock_id)",
+    "CREATE INDEX IF NOT EXISTS idx_margin_date ON margin_trading(date)",
+    "CREATE INDEX IF NOT EXISTS idx_mktidx_id   ON market_index(index_id)",
+    "CREATE INDEX IF NOT EXISTS idx_mktidx_date ON market_index(date)",
     "CREATE INDEX IF NOT EXISTS idx_inst_date  ON institutional_investors(date)",
 ]

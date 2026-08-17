@@ -43,26 +43,30 @@ def step1_load(csv_dir: str = "raw_data", overwrite: bool = False) -> None:
     loader.load_directory(csv_dir, overwrite=overwrite)
 
 
-# ── Step 1b：下載三大法人資料 ──────────────────────────────────
+# ── Step 1b：下載三大法人資料 + 融資融券 + TAIEX ──────────────────
 def step1b_institutional(start: str = "2015-01-01",
                           force: bool = False,
                           sid: str = None,
                           workers: int = 1) -> None:
     """
-    從 FinMind 增量下載三大法人買賣超資料。
+    從 FinMind 增量下載三大法人買賣超、融資融券、TAIEX 大盤指數。
 
     需要先執行 Step 1 建立股票清單，並設定環境變數 FINMIND_TOKEN。
-    
+    法人買賣超由 download_institutional.py 負責（支援並行）；
+    融資融券 + TAIEX 由 download_supplementary.py 負責（固定節奏速率限制）。
+
     Parameters
     ----------
-    workers : 並行下載數（預設 1）。建議 2–4 以平衡速度與 API 限制。
+    workers : 法人資料並行下載數（預設 1）。建議 2–4 以平衡速度與 API 限制。
     """
     from download_institutional import download_all
+    from download_supplementary import download_all_supplementary
     token = os.getenv("FINMIND_TOKEN", "")
     if not token:
         logger.error("請設定環境變數 FINMIND_TOKEN（FinMind 免費帳號可申請）")
         return
-    logger.info("=== Step 1b：下載三大法人資料 ===")
+
+    logger.info("=== Step 1b-1：下載三大法人資料 ===")
     download_all(
         db_path    = "data/taiwan_stock.db",
         token      = token,
@@ -70,6 +74,15 @@ def step1b_institutional(start: str = "2015-01-01",
         force      = force,
         sid_filter = sid,
         workers    = workers,
+    )
+
+    logger.info("=== Step 1b-2：下載融資融券 + TAIEX ===")
+    download_all_supplementary(
+        db_path    = "data/taiwan_stock.db",
+        token      = token,
+        start      = start,
+        force      = force,
+        sid_filter = sid,
     )
 
 
