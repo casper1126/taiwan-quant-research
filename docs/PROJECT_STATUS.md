@@ -439,7 +439,12 @@ institutional 每天都在增量更新、缺口比從零開始的 margin backfil
 2. **402 判定修正**：改成直接檢查 `resp.status_code == 402`，在
    `resp.raise_for_status()` 之前，用專屬的 `QuotaExhaustedError`（定義在共用模組
    `data_pipeline/finmind_common.py`，兩支下載器一起用，不再各自維護一份不同步的邏輯）
-   往上傳，跟「200 但真的沒資料」的空 DataFrame 明確分開。
+   往上傳，跟「200 但真的沒資料」的空 DataFrame 明確分開。**確認這行判斷式真的會被執行到
+   （不是第二個死碼）**：是純屬性檢查（`if resp.status_code == 402:`），不依賴任何
+   exception 的觸發時機，寫在 `resp.raise_for_status()` 呼叫之前的第一行，兩支下載器
+   分別在 `download_supplementary.py:197`、`download_institutional.py:283`；
+   `tests/test_download_supplementary.py::test_fetch_raises_quota_exhausted_on_http_402`
+   直接對這行斷言，pytest 通過即證明它有被執行到。
 3. **休眠 → 自動恢復，不再傻等重試**：402 不重試，直接記錄 checkpoint、計算距離下個
    時間窗口還有多久、`sleep` 到那個時間點自動醒來從同一檔繼續，期間每 10 分鐘印一次心跳
    log。連續 3 個時間窗口醒來後立刻又 402，才視為異常，正常結束 process 並提示
