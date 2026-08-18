@@ -253,11 +253,16 @@ def build_factors(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     # ④ 低波動因子：60 日 IVOL 倒數
     low_vol = factor_style.low_vol_ivol(factor_data).where(liquid_mask, np.nan)
 
-    # ⑤ 籌碼因子：外資 + 投信買超 / 60 日平均成交金額（正規化，最強台股因子）
+    # ⑤ 籌碼因子：外資 + 投信買超 / 60 日平均成交金額
+    #    2026-08-18 決定（見 docs/DECISIONS.md）：四輪 IC 排查後判定為誠實的負面
+    #    結果（不是 bug），已移出主策略複合權重（build_positions() 的 factor_map
+    #    不含它）。仍在此計算並回傳，供 Task 5 的非線性/ML 模型重新評估用。
     inst_flow = factor_taiwan.inst_flow(factor_data).where(liquid_mask, np.nan)
 
     # ⑥ 融資使用率因子：算出來供診斷/單元測試使用，
     #    依 Task 2c 規格暫不進複合權重（build_positions() 的 factor_map 不含它）
+    #    2026-08-18：與 inst_flow 一起完成同樣的四輪 IC 排查，結論相同
+    #    （見 docs/DECISIONS.md、reports/factor_negative_findings.md），維持排除。
     margin_usage = factor_taiwan.margin_usage(factor_data).where(liquid_mask, np.nan)
 
     # ⑦ 品質因子（佔位，回傳 NaN）
@@ -433,7 +438,6 @@ def build_positions(factors: dict,
     PER        = factors["PER"].reindex(columns=cols)
     value      = factors["value"].reindex(columns=cols)
     low_vol    = factors["low_vol"].reindex(columns=cols)
-    inst_flow   = factors["inst_flow"].reindex(columns=cols)
     mom_120     = factors.get("mom_120", pd.DataFrame(np.nan, index=close.index, columns=cols)).reindex(columns=cols)
     div_yld     = factors.get("div_yld", pd.DataFrame(np.nan, index=close.index, columns=cols)).reindex(columns=cols)
     dollar_volume = factors.get("dollar_volume", pd.DataFrame(np.nan, index=close.index, columns=cols)).reindex(columns=cols)
@@ -446,17 +450,19 @@ def build_positions(factors: dict,
     #       否則會喪失 value 因子的深度樣本。改為只用流動性與乖離作為過濾。
     valid = (bias < bias_cap) & liquid_mask
 
-    # ── 合成因子（IC 加權，含籌碼）──────────────────────────
+    # ── 合成因子（IC 加權，四因子）──────────────────────────
     #
-    # 因子（Task 2c 規格權重，見下方 default_weights）
-    # momentum 0.15 / value 0.20 / rev_yoy 0.20 / low_vol 0.15 / inst_flow 0.30
+    # 2026-08-18 決定（docs/DECISIONS.md、reports/factor_negative_findings.md）：
+    # inst_flow 經四輪真實資料 IC 排查（正規化前後對照、資料補齊前後對照、
+    # SQL 逐筆核對真實 API、短窗口重測、分年份拆解）後判定為誠實的負面結果——
+    # 不是 bug，是這個定義下的因子在線性排名方法下對未來報酬沒有穩定預測力。
+    # 移出主策略複合，留給 Task 5 的非線性/ML 方法重新評估。
     #
-    # 籌碼因子給最高權重（0.30），因為：
-    # 1. IC 預期最高（外資有訊息優勢）
-    # 2. 與其他因子相關性低（互補性最強）
-    # 3. 資料最即時（每日公告）
-    # 如果 inst_flow 全是 NaN（資料尚未載入），
-    # cross_zscore 返回 0，不影響其他因子
+    # 剩餘四因子權重（見下方 default_weights）：
+    # momentum 0.34 / value 0.18 / rev_yoy 0.18 / low_vol 0.30
+    # 依各自 2015-2026 全樣本實測 20 日 IC 均值的相對強弱正規化分配
+    # （momentum 0.038 / value 0.020 / rev_yoy 0.020 / low_vol 0.033，
+    # 總和 0.111 → 各自 IC / 總和），不是簡單平均分配。
     #
     # cross_zscore 移到 factors/base.py（Task 2 模組化），這裡不再重複定義
     cross_zscore = factor_base.cross_zscore
@@ -473,7 +479,6 @@ def build_positions(factors: dict,
         "value": value,
         "rev_yoy": rev_yoy,
         "low_vol": low_vol,
-        "inst_flow": inst_flow,
         "div_yld": div_yld,
     }
 
@@ -495,18 +500,19 @@ def build_positions(factors: dict,
 
     # 若某日所有因子 ic_rolling 為 0/NaN，fallback 回預設權重並排除不存在的因子
     #
-    # 五個核心因子照 Task 2c 規格：momentum 0.15 / value 0.20 / rev_yoy 0.20 /
-    # low_vol 0.15 / inst_flow 0.30（總和 1.00）。mom_120、div_yld 是任務書
-    # 規格之外的補充因子，這裡的 fallback 權重給 0——它們仍然留在 factor_map
-    # 裡，資料充足時一樣會透過上面的動態 IC 加權機制拿到權重，只是「資料不足
-    # 時的預設值」嚴格照任務書的五因子配置，不稀釋掉。
+    # 2026-08-18 決定（docs/DECISIONS.md）：inst_flow 移出複合（見上方註解），
+    # 剩餘四個核心因子的 fallback 權重依實測 20 日 IC 均值的相對強弱正規化：
+    #   momentum 0.038 / value 0.020 / rev_yoy 0.020 / low_vol 0.033
+    #   → 總和 0.111 → momentum 0.34 / value 0.18 / rev_yoy 0.18 / low_vol 0.30
+    # mom_120、div_yld 是任務書規格之外的補充因子，fallback 權重給 0——它們仍
+    # 留在 factor_map 裡，資料充足時一樣會透過上面的動態 IC 加權機制拿到權重，
+    # 只是「資料不足時的預設值」嚴格照四因子配置，不稀釋掉。
     default_weights = {
-        "momentum": 0.15,
+        "momentum": 0.34,
         "mom_120": 0.0,
-        "value": 0.20,
-        "rev_yoy": 0.20,
-        "low_vol": 0.15,
-        "inst_flow": 0.30,
+        "value": 0.18,
+        "rev_yoy": 0.18,
+        "low_vol": 0.30,
         "div_yld": 0.0,
     }
     # 只保留 active 因子的預設權重並正規化
