@@ -210,6 +210,31 @@ def margin_capitulation(margin_total: pd.Series, volume: pd.Series) -> pd.Series
     return result
 
 
+def price_trend_vs_ma(index_close: pd.Series, window: int = 200) -> pd.Series:
+    """
+    大盤價格趨勢濾網：TAIEX 收盤價相對 window 日均線的乖離率。
+
+    2026-08-19 新增（Task 3 收尾，見 docs/DECISIONS.md）：原本 3b 的六個
+    健康分數成分全部是「市場廣度／微結構」型指標（寬度、高低差、相關性、
+    不對稱性、波動、融資緊縮），沒有任何一個直接反映「大盤價格本身在
+    漲還是在跌」，導致 2023-24 這種「指數漲、但漲勢集中在少數權值股、
+    多數個股沒有跟著漲」的市場，健康分數容易失真地偏低。
+
+    參考 Kritzman, Page & Turkington (2012)〈Regime Shifts: Implications
+    for Dynamic Strategies〉的機制模型設計精神——同時納入「趨勢」與
+    「風險」兩類指標，不能只看風險面——這裡補上最直接的趨勢指標：
+    價格 vs 長期均線，正值代表站上均線（趨勢偏多），負值代表跌破
+    （趨勢偏空）。
+
+    傳回值本身是連續的乖離率（不是 0/1 二元訊號），交給 health_score.py
+    的 rolling-252 分位數轉換去標準化，跟其他成分的處理方式一致。
+    """
+    if index_close is None or index_close.empty:
+        return pd.Series(dtype=float)
+    ma = index_close.rolling(window, min_periods=window).mean()
+    return (index_close / ma) - 1.0
+
+
 def turnover_structure(index_volume: pd.Series, window: int = 20) -> pd.Series:
     """量能相對 window 日均量的比值：>1 表示量能放大，<1 表示量縮。"""
     if index_volume is None or index_volume.empty:

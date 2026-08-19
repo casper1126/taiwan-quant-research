@@ -14,6 +14,18 @@ Task 3b：把 regime/indicators.py 的原始指標合成一個 0-100 的市場�
 3. NaN 成分：該日若某成分是 NaN，跳過該成分並用剩餘成分的權重比例重新
    正規化（例如只有 3 項有值，就用那 3 項的權重比例分配到 91 分）。
    若六項核心成分全部 NaN，當日健康分數輸出 NaN。
+
+2026-08-19 試驗與回退記錄（Task 3 收尾，見 docs/DECISIONS.md 完整討論）：
+曾經試著加入第 7 項「大盤價格趨勢」成分（vs 200 日均線，權重 20，原六項
+依比例縮小維持總和 91），目的是解決 2023-24 健康分數因為市場廣度指標
+跟大盤指數走勢背離（權值股領漲、多數個股沒跟上）而系統性偏低的問題。
+實測結果：2023-24 BULL 比例只從 18.9% 改善到 23.9%，沒有達到「合理提升
+（例如超過 35-40%）」的採用門檻，所以**回退到原本六項成分的設計**。
+`indicators.price_trend_vs_ma()` 函式仍保留在程式庫裡（regime_engine.py
+仍會計算並放進 ml_alert 的特徵矩陣，只是不再進健康分數合成），因為
+2023-24 健康分數偏低被判定為「市場廣度真實背離大盤指數的現象」，不是
+系統缺陷（詳見 reports/health_score_breadth_divergence.md），刻意調整
+權重去湊分數反而是不該做的事。
 """
 
 from typing import Dict
@@ -30,6 +42,7 @@ CORE_WEIGHTS = {
     "asym":           (13, True),
     "squeeze":        (12, False),
 }
+TOTAL_CORE_WEIGHT = sum(w for w, _ in CORE_WEIGHTS.values())
 CAPITULATION_BONUS = 9
 
 
@@ -61,6 +74,11 @@ def compute_health_score(raw: Dict[str, pd.Series]) -> pd.Series:
       asym         : indicators.downside_asymmetry() 的輸出
       squeeze      : indicators.margin_squeeze_ratio() 的輸出
       capitulation : indicators.margin_capitulation() 的輸出（布林/NaN）
+
+    raw 可以額外包含 "trend"（indicators.price_trend_vs_ma() 的輸出），
+    但目前不會被使用——2026-08-19 試過把它加進複合分數，效果不夠明顯
+    （見上方模組 docstring 的回退記錄），只是保留參數相容性，不強制
+    呼叫端把它拿掉。
     """
     idx = None
     for key in ("vol_pctile", "breadth", "hl_diff", "corr", "asym", "squeeze"):
@@ -86,7 +104,7 @@ def compute_health_score(raw: Dict[str, pd.Series]) -> pd.Series:
         weighted_val = weighted_val.add(contrib.where(available, 0.0) * weight, fill_value=0.0)
         weight_sum = weight_sum.add(available.astype(float) * weight, fill_value=0.0)
 
-    core_score = np.where(weight_sum > 0, weighted_val / weight_sum * 91.0, np.nan)
+    core_score = np.where(weight_sum > 0, weighted_val / weight_sum * TOTAL_CORE_WEIGHT, np.nan)
     core_score = pd.Series(core_score, index=idx)
 
     capitulation = raw.get("capitulation")

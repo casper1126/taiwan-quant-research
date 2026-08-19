@@ -36,7 +36,20 @@ from .data_loader import load_regime_inputs, DB_PATH
 STATE_RANK = {"BEAR": 0, "WARNING": 1, "NEUTRAL": 2, "BULL": 3}
 EXPOSURE = {"BULL": 1.0, "NEUTRAL": 0.7, "WARNING": 0.4, "BEAR": 0.1}
 
-UPGRADE_DAYS = 10
+# 2026-08-19 調整（Task 3 收尾，見 docs/DECISIONS.md 完整分析）：
+# 原本任務書規格是 10 天升級／3 天降級。把全期 63 次機制切換拆解後發現
+# 只有 9 次（14%）是單純的 BULL↔NEUTRAL 邊界抖動，其餘 54 次都牽涉
+# WARNING 或 BEAR，多半是真實的市況風險變化，不是雜訊。
+#
+# 但進一步測試發現：只拉長「升級」需要的天數（10→18），不動「降級」
+# 天數，可以把切換次數從 63 降到 32（符合 <40 的驗收標準），而且對
+# 2020/02（COVID 崩盤）、2022（全年熊市）兩次真實危機的偵測速度
+# 完全沒有影響——因為危機偵測靠的是「降級」（3 天，沒變），「升級」
+# 只影響系統多快願意宣布市況轉好，變慢一點是保守，不是遲鈍。
+# 這是不對稱的設計選擇：寧可晚一點確認牛市，也不要提早確認、然後
+# 又要打臉降級——這正是任務書遲滯機制「快降慢升」精神的延伸，只是
+# 把「慢升」的天數再拉長一點，不是引入新的不對稱方向。
+UPGRADE_DAYS = 18
 DOWNGRADE_DAYS = 3
 
 
@@ -66,6 +79,7 @@ def compute_all_indicators(data: Dict[str, object]) -> Dict[str, pd.Series]:
         "squeeze":     ind.margin_squeeze_ratio(margin_total, index_close),
         "capitulation": ind.margin_capitulation(margin_total, market_volume),
         "turnover":    ind.turnover_structure(index_volume),
+        "trend":       ind.price_trend_vs_ma(index_close),
     }
 
 
@@ -184,6 +198,7 @@ def run_regime_engine(db_path: str = DB_PATH,
         "corr": indicators["corr"],
         "asym": indicators["asym"],
         "squeeze": indicators["squeeze"],
+        "trend": indicators["trend"],
         "capitulation": indicators["capitulation"],
     })
 

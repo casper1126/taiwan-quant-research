@@ -150,31 +150,56 @@ def test_classify_regime_raw_thresholds():
 
 
 def test_hysteresis_downgrade_fast_upgrade_slow():
+    """
+    用明確傳入的 upgrade_days/downgrade_days 測邏輯本身（不依賴 regime_engine.py
+    模組層級的 UPGRADE_DAYS/DOWNGRADE_DAYS 常數，避免以後常數調整就要跟著
+    改測試——邏輯測試應該測「規則對不對」，不是測「目前設成幾天」）。
+    """
     idx = _dates(30)
     # 前 15 天穩定 BULL，接著連續 3 天 raw=WARNING（應該觸發降級，因為降級只需 3 天）
     raw_vals = ["BULL"] * 15 + ["WARNING"] * 3 + ["BULL"] * 12
     raw = pd.Series(raw_vals, index=idx)
 
-    confirmed = apply_hysteresis(raw)
+    confirmed = apply_hysteresis(raw, upgrade_days=10, downgrade_days=3)
     # 第 15+3-1 天（index 17）應該已經降級成 WARNING
     assert confirmed.iloc[17] == "WARNING"
 
-    # 之後 raw 又變回 BULL，但只有 12 天 < 10 天升級門檻不足以確認... 實際上 12>=10 應該會升級回去
+    # 之後 raw 又變回 BULL，滿 12 天 >= 10 天升級門檻，應該升級回去
     assert confirmed.iloc[-1] == "BULL"
 
 
-def test_hysteresis_upgrade_needs_ten_days():
+def test_hysteresis_upgrade_needs_configured_days():
     idx = _dates(19)
     raw_vals = ["BEAR"] * 10 + ["BULL"] * 9  # 只有 9 天 BULL，不足 10 天升級門檻
     raw = pd.Series(raw_vals, index=idx)
-    confirmed = apply_hysteresis(raw)
+    confirmed = apply_hysteresis(raw, upgrade_days=10, downgrade_days=3)
     assert confirmed.iloc[-1] == "BEAR"  # 還沒升級成功
 
     idx2 = _dates(21)
     raw_vals2 = ["BEAR"] * 10 + ["BULL"] * 11  # 滿 10 天，應該升級
     raw2 = pd.Series(raw_vals2, index=idx2)
-    confirmed2 = apply_hysteresis(raw2)
+    confirmed2 = apply_hysteresis(raw2, upgrade_days=10, downgrade_days=3)
     assert confirmed2.iloc[-1] == "BULL"
+
+
+def test_hysteresis_uses_production_defaults_18_up_3_down():
+    """
+    鎖住目前 regime_engine.py 實際使用的預設值（2026-08-19 調整後：升級 18
+    天／降級 3 天，見模組內註解的完整分析）。這個測試故意寫死目前的預設值，
+    如果以後又調整了 UPGRADE_DAYS/DOWNGRADE_DAYS，這裡應該要跟著失敗，
+    提醒開發者同步更新 docs/DECISIONS.md 裡的分析。
+    """
+    idx = _dates(22)
+    raw_vals = ["BEAR"] * 10 + ["BULL"] * 12  # 12 天 < 18 天新門檻，不該升級
+    raw = pd.Series(raw_vals, index=idx)
+    confirmed = apply_hysteresis(raw)  # 用模組預設值
+    assert confirmed.iloc[-1] == "BEAR"
+
+    idx2 = _dates(13)
+    raw_vals2 = ["BULL"] * 10 + ["WARNING"] * 3  # 降級門檻仍是 3 天，應該觸發
+    raw2 = pd.Series(raw_vals2, index=idx2)
+    confirmed2 = apply_hysteresis(raw2)
+    assert confirmed2.iloc[-1] == "WARNING"
 
 
 # ══════════════════════════════════════════════════════════════
