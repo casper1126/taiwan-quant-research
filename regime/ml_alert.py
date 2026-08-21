@@ -76,10 +76,15 @@ def walk_forward_alert(features: pd.DataFrame, labels: pd.Series,
     回傳：
       crash_prob : pd.Series(index=date)，OOS 崩盤機率（只在有效測試年份有值）
       auc_by_year: {year: auc}，同時存成 JSON 到 auc_report_path
+
+    標籤（未來 20 日報酬）在資料集最後 20 個交易日必然是 NaN（沒有未來
+    資料可以算），但特徵在當天就有值——這裡刻意把「訓練/AUC 評估用」
+    （需要真實標籤）跟「預測用」（只需要特徵）分開處理，讓最新的
+    ~20 個交易日照樣能拿到 crash_prob，不會因為標籤還沒揭曉就整批
+    變成 NaN。這對 Task 8 的每日自動化很重要：不能今天算出來的
+    crash_prob 硬是要等 20 天後才有值。
     """
-    common_idx = features.index.intersection(labels.dropna().index)
-    features = features.loc[common_idx]
-    labels = labels.loc[common_idx]
+    label_idx = features.index.intersection(labels.dropna().index)
 
     years = sorted(set(features.index.year))
     test_years = [y for y in years if y >= first_test_year]
@@ -88,13 +93,14 @@ def walk_forward_alert(features: pd.DataFrame, labels: pd.Series,
     auc_by_year: Dict[str, float] = {}
 
     for y in test_years:
-        train_mask = features.index.year < y
-        test_mask = features.index.year == y
+        train_label_mask = label_idx[label_idx.year < y]
+        test_feat_mask = features.index.year == y
+        test_label_mask = label_idx[label_idx.year == y]
 
-        X_train, y_train = features.loc[train_mask], labels.loc[train_mask]
-        X_test, y_test = features.loc[test_mask], labels.loc[test_mask]
+        X_train, y_train = features.loc[train_label_mask], labels.loc[train_label_mask]
+        X_test_all = features.loc[test_feat_mask]
 
-        if X_train.empty or X_test.empty:
+        if X_train.empty or X_test_all.empty:
             continue
         n_pos = int(y_train.sum())
         if n_pos < 20 or n_pos == len(y_train):
@@ -111,15 +117,22 @@ def walk_forward_alert(features: pd.DataFrame, labels: pd.Series,
         )
         model.fit(X_train, y_train)
 
-        proba = model.predict_proba(X_test)[:, 1]
-        crash_prob.loc[test_mask] = proba
+        # 預測：整年所有有特徵的交易日（不需要標籤）
+        proba_all = model.predict_proba(X_test_all)[:, 1]
+        crash_prob.loc[test_feat_mask] = proba_all
 
-        if y_test.nunique() >= 2:
-            auc = roc_auc_score(y_test, proba)
-            auc_by_year[str(y)] = round(float(auc), 4)
+        # AUC 評估：只用有真實標籤（未來 20 日報酬已揭曉）的子集
+        if len(test_label_mask) > 0:
+            y_test = labels.loc[test_label_mask]
+            proba_eval = model.predict_proba(features.loc[test_label_mask])[:, 1]
+            if y_test.nunique() >= 2:
+                auc = roc_auc_score(y_test, proba_eval)
+                auc_by_year[str(y)] = round(float(auc), 4)
+            else:
+                auc_by_year[str(y)] = None
+                logger.warning(f"ml_alert {y} 年：測試集只有單一類別，AUC 無法計算")
         else:
             auc_by_year[str(y)] = None
-            logger.warning(f"ml_alert {y} 年：測試集只有單一類別，AUC 無法計算")
 
     Path(auc_report_path).parent.mkdir(parents=True, exist_ok=True)
     with open(auc_report_path, "w", encoding="utf-8") as f:

@@ -19,6 +19,7 @@ from pandas.tseries.offsets import DateOffset
 from factors import base as factor_base
 from factors import style as factor_style
 from factors import taiwan as factor_taiwan
+import portfolio as portfolio_module
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -375,29 +376,57 @@ def risk_parity_weights(returns: pd.DataFrame, holdings: list) -> dict:
     """
     計算風險平價權重：每支股票對組合總風險的貢獻相同。
 
-    用過去 60 天日報酬的波動度（std）倒數作為權重，
-    再正規化使總和 = 1。低波動股票獲得較大部位。
-
-    Parameters
-    ----------
-    returns  : 日報酬寬格式矩陣（index=date, columns=stock_id）
-    holdings : 當期持股清單
-
-    Returns
-    -------
-    dict: {stock_id: weight}，weights sum to 1.0
+    Task 4c（strategy/portfolio.py）把這個邏輯抽成共用模組，這裡保留
+    同名函式當薄包裝，避免動到其他呼叫這個函式名稱的地方。
     """
-    if not holdings:
-        return {}
-    vols = returns[holdings].iloc[-60:].std().replace(0, np.nan)
-    vols = vols.dropna()
-    if vols.empty:
-        # fallback: equal weight
-        return {s: 1.0 / len(holdings) for s in holdings}
-    inv_vol = 1.0 / vols
-    normed  = inv_vol / inv_vol.sum()
-    result  = {s: float(normed.get(s, 1.0 / len(holdings))) for s in holdings}
-    return result
+    return portfolio_module.risk_parity_weight(returns, holdings, window=60)
+
+
+# ══════════════════════════════════════════════════════════════
+# PART 2b  機制動態因子權重（Task 4a）
+# ══════════════════════════════════════════════════════════════
+#
+# 任務書規格的原始版本含 inst_flow（5 因子）：
+#   BULL:    momentum .30 / value .10 / rev_yoy .25 / low_vol .05 / inst_flow .30
+#   NEUTRAL: momentum .15 / value .20 / rev_yoy .20 / low_vol .15 / inst_flow .30
+#   WARNING: momentum .05 / value .25 / rev_yoy .15 / low_vol .35 / inst_flow .20
+#   BEAR:    momentum .00 / value .30 / rev_yoy .10 / low_vol .50 / inst_flow .10
+#
+# 2026-08-18 的 Task 2 決定（docs/DECISIONS.md、
+# reports/factor_negative_findings.md）已經確認 inst_flow 在四輪真實資料
+# 排查後對未來報酬沒有穩定預測力，移出主策略複合，這個決定對 Task 4 一樣
+# 適用——繼續把它排除在外，不是遺漏，是延續同一個已經記錄過理由的決定。
+#
+# 下面的權重是「拿掉 inst_flow 那一欄，剩下四個因子依原本的相對比例
+# 重新正規化」算出來的（例如 BULL：momentum .30/value .10/rev_yoy .25/
+# low_vol .05 四項總和 .70，各自除以 .70），不是重新設計的權重——
+# 保留任務書對「不同機制下哪個因子該加重」的原始判斷，只是把分母換成
+# 四因子的總和。
+REGIME_FACTOR_WEIGHTS = {
+    "BULL":    {"momentum": 0.4286, "value": 0.1429, "rev_yoy": 0.3571, "low_vol": 0.0714},
+    "NEUTRAL": {"momentum": 0.2143, "value": 0.2857, "rev_yoy": 0.2857, "low_vol": 0.2143},
+    "WARNING": {"momentum": 0.0625, "value": 0.3125, "rev_yoy": 0.1875, "low_vol": 0.4375},
+    "BEAR":    {"momentum": 0.0,    "value": 0.3333, "rev_yoy": 0.1111, "low_vol": 0.5556},
+}
+
+
+def _regime_state_and_exposure(regime_df: Optional[pd.DataFrame], today) -> Tuple[str, float]:
+    """
+    查某一天的機制狀態與建議曝險比例，NaN（機制輸出尚未暖機完成的早期
+    區間，見 regime/hmm_detector.py 的 504 天門檻）一律 fallback 回
+    NEUTRAL / 0.7——不是「猜」，是選一個中性、不偏多不偏空的預設值，
+    跟 quant_layer2.py 其他地方「資料不足時退回保守預設」的處理原則一致。
+    """
+    if regime_df is None or today not in regime_df.index:
+        return "NEUTRAL", 0.7
+    row = regime_df.loc[today]
+    state = row.get("regime")
+    exposure = row.get("exposure")
+    if pd.isna(state) or state not in REGIME_FACTOR_WEIGHTS:
+        state = "NEUTRAL"
+    if pd.isna(exposure):
+        exposure = 0.7
+    return state, float(exposure)
 
 
 def build_positions(factors: dict,
@@ -407,7 +436,10 @@ def build_positions(factors: dict,
                     buffer_multiplier: float = 1.5,
                     use_risk_parity: bool = False,
                     inertia: float = 0.6,
-                    max_pct_dv: Optional[float] = None) -> pd.DataFrame:
+                    max_pct_dv: Optional[float] = None,
+                    regime_df: Optional[pd.DataFrame] = None,
+                    use_regime_weights: bool = False,
+                    weighting: Optional[str] = None) -> pd.DataFrame:
     """
     根據因子決定每天的持倉比例矩陣。
 
@@ -428,7 +460,34 @@ def build_positions(factors: dict,
       賣出股票：排名跌出前 top_n × buffer_multiplier 才賣
       例如 top_n=30, buffer=1.5 → 進場閾值 30，出場閾值 45
       這讓已持倉的股票有更多空間，大幅降低邊界替換頻率。
+
+    ── Task 4：機制整合（regime_df / use_regime_weights）──────
+    regime_df 是 regime/regime_engine.py 的 run_regime_engine() 回傳的
+    result_df（欄位含 'regime'、'exposure'），reindex 到 close.index 對齊。
+
+    use_regime_weights=False（預設）：跟 Task 2 一樣，用全期動態 IC 加權
+    合成因子分數，大盤擇時維持原本的二元開關（proxy vs 60 日均線）。
+
+    use_regime_weights=True：
+      4a. 每個再平衡日查當日機制（BULL/NEUTRAL/WARNING/BEAR），用
+          REGIME_FACTOR_WEIGHTS 對應的靜態權重合成當天的因子分數，
+          取代動態 IC 加權（機制標籤本身就是「當下該偏重哪些因子」的
+          判斷依據，不需要再疊加一層滾動 IC 權重）。
+      4b. 部位大小 = 選股結果（等權或風險平價）× 當日機制的建議曝險
+          比例（BULL 1.0／NEUTRAL 0.7／WARNING 0.4／BEAR 0.1），在
+          再平衡日鎖定、期間不動，取代原本「多頭才買入、空頭只賣不買」
+          的二元擇時開關——用連續的曝險縮放取代二元開關來控制風險，
+          選股邏輯（買賣哪些股票）本身不再因機制而改變。
+
+    weighting：Task 4c 規格的字串介面（'equal'|'risk_parity'），如果有給
+    值就覆蓋 use_risk_parity（等同 weighting=='risk_parity'）；沒給值就
+    照舊看 use_risk_parity。兩個參數並存是為了不破壞既有呼叫端。
     """
+    if weighting is not None:
+        if weighting not in ("equal", "risk_parity"):
+            raise ValueError(f"weighting 必須是 'equal' 或 'risk_parity'，收到：{weighting!r}")
+        use_risk_parity = (weighting == "risk_parity")
+
     close = factors["close"]
     cols  = close.columns
 
@@ -538,11 +597,23 @@ def build_positions(factors: dict,
 
     masked_composite = composite.where(valid, np.nan)
 
+    # ── Task 4a：機制靜態權重合成（只有 use_regime_weights=True 才用）──
+    # 只有四個核心因子（momentum/value/rev_yoy/low_vol）有定義在
+    # REGIME_FACTOR_WEIGHTS 裡；mom_120、div_yld 不是任務書規格因子，
+    # 機制模式下權重視為 0（不參與），跟動態 IC 模式的 fallback 邏輯一致。
+    regime_core_factors = [f for f in ("momentum", "value", "rev_yoy", "low_vol")
+                            if f in active_factors]
+
+    def _regime_scores_today(today) -> pd.Series:
+        state, _ = _regime_state_and_exposure(regime_df, today)
+        weights = REGIME_FACTOR_WEIGHTS[state]
+        score = pd.Series(0.0, index=cols)
+        for name in regime_core_factors:
+            score = score.add(cz[name].loc[today] * weights.get(name, 0.0), fill_value=0.0)
+        return score.where(valid.loc[today], np.nan)
+
     # ── 再平衡日索引 ──────────────────────────────────────────
     rebal_idx = np.where(np.arange(len(close)) % rebal_freq == 0)[0]
-
-    # ── 緩衝區設定 ────────────────────────────────────────────
-    exit_threshold = int(top_n * buffer_multiplier)
 
     # ── 大盤擇時：空頭時停止買入（不改變現有持倉權重）──────────
     #
@@ -574,32 +645,33 @@ def build_positions(factors: dict,
     last_rebal_pos = pd.Series(0.0, index=cols)
 
     for day_idx in rebal_idx:
-        today        = close.index[day_idx]
-        is_bull      = timing_stepped.loc[today] >= 0.5
-        scores_today = masked_composite.loc[today]
-        rank_today   = scores_today.rank(ascending=False)
+        today = close.index[day_idx]
 
-        # 無論多空，跌出緩衝區就賣（風險控制永遠執行）
-        to_sell = {s for s in current_holds_timed
-                   if pd.isna(rank_today.get(s, np.nan))
-                   or rank_today[s] > exit_threshold}
-        current_holds_timed -= to_sell
+        if use_regime_weights:
+            # 4b：選股邏輯不再因機制而暫停買入，風險控制交給曝險縮放
+            # （下面 target_pos 會乘上 exposure），所以這裡永遠視為「可以買」。
+            is_bull = True
+            scores_today = _regime_scores_today(today)
+            _, exposure_today = _regime_state_and_exposure(regime_df, today)
+        else:
+            is_bull = timing_stepped.loc[today] >= 0.5
+            scores_today = masked_composite.loc[today]
+            exposure_today = 1.0
+
+        rank_today = scores_today.rank(ascending=False)
+
+        # 緩衝區進出場規則（Task 4c，strategy/portfolio.py）：
+        # 無論多空，跌出緩衝區就賣（風險控制永遠執行）；is_bull 控制是否
+        # 允許買進新股（機制模式下永遠 True，見上方 is_bull 設定的註解）。
+        new_holds = portfolio_module.apply_buffer(
+            rank_today, current_holds_timed,
+            top_n=top_n, buffer_multiplier=buffer_multiplier, allow_entry=is_bull,
+        )
+        to_sell = current_holds_timed - new_holds
+        current_holds_timed = new_holds
         # 對已被賣出的股票，立即把上一期持倉權重清為 0（避免 inertia 導致殘留小倉）
         if to_sell:
             last_rebal_pos.loc[list(to_sell)] = 0.0
-
-        if is_bull:
-            # 多頭才買入新股
-            entry_candidates = set(rank_today[rank_today <= top_n].index.tolist())
-            to_buy = entry_candidates - current_holds_timed
-            current_holds_timed |= to_buy
-
-            if len(current_holds_timed) > top_n:
-                ranked = sorted(
-                    [(s, rank_today.get(s, 9999)) for s in current_holds_timed],
-                    key=lambda x: x[1]
-                )
-                current_holds_timed = {s for s, _ in ranked[:top_n]}
 
         if current_holds_timed:
             holds_list = list(current_holds_timed)
@@ -612,6 +684,13 @@ def build_positions(factors: dict,
                     target_pos[s] = w
             else:
                 target_pos[holds_list] = eq_weight
+
+            # 4b：機制模式下，目標權重整個乘上當日曝險比例——選股結果本身
+            # 不變（還是等權/風險平價分給 top_n 檔），但整體部位規模隨機制
+            # 縮放（BULL 1.0 全倉 ~ BEAR 0.1 幾乎空手），沒用掉的部分留白
+            # （視為現金），在再平衡日決定、期間不會再變動。
+            if use_regime_weights:
+                target_pos = target_pos * exposure_today
 
             # 權重平滑：new = inertia*prev + (1-inertia)*target
             new_pos = last_rebal_pos * float(inertia) + target_pos * (1.0 - float(inertia))
@@ -639,8 +718,11 @@ def build_positions(factors: dict,
                 pos_timed.loc[today] = executed_pos.values
                 last_rebal_pos = executed_pos
             else:
-                # 無流動性限制，照原本邏輯執行並正規化
-                if new_pos.sum() > 0:
+                # 無流動性限制，照原本邏輯執行並正規化——
+                # 機制模式下刻意不做這個 renormalize：new_pos 的總和本來就
+                # 應該等於 exposure_today（< 1 代表刻意保留現金部位控制
+                # 風險），重新正規化回 1 會把曝險縮放的效果整個抵銷掉。
+                if not use_regime_weights and new_pos.sum() > 0:
                     new_pos = new_pos / new_pos.sum()
                 pos_timed.loc[today] = new_pos.values
                 last_rebal_pos = new_pos
@@ -833,9 +915,18 @@ def run_pipeline(top_n: Optional[int] = None,
                  commission: Optional[float] = None,
                  tax: Optional[float] = None,
                  slippage: Optional[float] = None,
-                 save_equity_path: Optional[str] = None) -> Tuple[dict, pd.Series, pd.DataFrame]:
+                 save_equity_path: Optional[str] = None,
+                 regime_df: Optional[pd.DataFrame] = None,
+                 use_regime_weights: Optional[bool] = None,
+                 weighting: Optional[str] = None) -> Tuple[dict, pd.Series, pd.DataFrame]:
     """
     Run the full pipeline with optional parameter overrides.
+
+    regime_df/use_regime_weights：Task 4 機制整合，見 build_positions() 的
+    docstring。regime_df 由呼叫端先跑 regime/regime_engine.py 的
+    run_regime_engine() 取得（quant_layer2.py 本身不 import regime/，
+    維持 Task 3-4 一開始定案的單向依賴：regime/ 不依賴 quant_layer2.py，
+    但 quant_layer2.py 可以被動接受它的輸出）。
 
     Returns: (stats_dict, equity_series, positions_df)
     """
@@ -849,6 +940,7 @@ def run_pipeline(top_n: Optional[int] = None,
     commission = COMMISSION if commission is None else commission
     tax = TAX if tax is None else tax
     slippage = SLIPPAGE if slippage is None else slippage
+    use_regime_weights = False if use_regime_weights is None else use_regime_weights
 
     # Step 1：載入資料
     data = load_matrices(DB_PATH, START_DATE, END_DATE)
@@ -873,6 +965,9 @@ def run_pipeline(top_n: Optional[int] = None,
         use_risk_parity=use_risk_parity,
         inertia=inertia,
         max_pct_dv=max_pct_dv,
+        regime_df=regime_df,
+        use_regime_weights=use_regime_weights,
+        weighting=weighting,
     )
 
     # Step 5：回測
