@@ -169,7 +169,7 @@ def apply_hysteresis(raw_states: pd.Series,
 
 
 def run_regime_engine(db_path: str = DB_PATH,
-                      start: str = "2015-01-01",
+                      start: str = "2012-05-02",
                       end: str = "2026-12-31",
                       run_ml_alert: bool = True
                       ) -> Tuple[pd.DataFrame, Dict[str, object]]:

@@ -242,6 +242,13 @@ def _get_last_date_margin(conn: sqlite3.Connection, stock_id: str) -> Optional[s
     return None
 
 
+def _get_min_date_margin(conn: sqlite3.Connection, stock_id: str) -> Optional[str]:
+    row = conn.execute(
+        "SELECT MIN(date) FROM margin_trading WHERE stock_id = ?", (stock_id,)
+    ).fetchone()
+    return row[0] if row and row[0] else None
+
+
 def _upsert_margin(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     """
     寫入 margin_trading。FinMind 欄位：
@@ -321,6 +328,46 @@ def download_margin_one(stock_id: str, db_path: str, token: str,
     return result
 
 
+def download_margin_one_backfill(stock_id: str, db_path: str, token: str,
+                                  target_start: str) -> Dict[str, object]:
+    """
+    往回補單一股票的融資融券資料（跟 download_margin_one 方向相反）：
+    只抓「比 DB 現有最早日期更早、直到 target_start」的區間。見
+    download_institutional.py 的 download_one_backfill 完整說明，邏輯一致。
+    """
+    result = {"stock_id": stock_id, "rows": 0, "status": "ok"}
+
+    with sqlite3.connect(db_path) as conn:
+        min_date = _get_min_date_margin(conn, stock_id)
+
+    if min_date is None:
+        result["status"] = "no_existing_data"
+        return result
+
+    if min_date <= target_start:
+        result["status"] = "already_covered"
+        return result
+
+    end_date = (datetime.strptime(min_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    try:
+        df = _fetch(DATASET_MARGIN, stock_id, target_start, end_date, token)
+    except QuotaExhaustedError:
+        result["status"] = "quota_exhausted"
+        return result
+
+    if df.empty:
+        result["status"] = "no_data"
+        return result
+
+    with sqlite3.connect(db_path) as conn:
+        rows = _upsert_margin(conn, df)
+        conn.commit()
+
+    result["rows"] = rows
+    return result
+
+
 # ══════════════════════════════════════════════════════════════
 # market_index（TAIEX）
 # ══════════════════════════════════════════════════════════════
@@ -333,6 +380,13 @@ def _get_last_date_index(conn: sqlite3.Connection, index_id: str = INDEX_ID) -> 
         last = datetime.strptime(row[0], "%Y-%m-%d")
         return (last + timedelta(days=1)).strftime("%Y-%m-%d")
     return None
+
+
+def _get_min_date_index(conn: sqlite3.Connection, index_id: str = INDEX_ID) -> Optional[str]:
+    row = conn.execute(
+        "SELECT MIN(date) FROM market_index WHERE index_id = ?", (index_id,)
+    ).fetchone()
+    return row[0] if row and row[0] else None
 
 
 def _upsert_index(conn: sqlite3.Connection, df: pd.DataFrame, index_id: str = INDEX_ID) -> int:
@@ -384,6 +438,42 @@ def download_index(db_path: str, token: str, start: str = DEFAULT_START,
 
     try:
         df = _fetch(DATASET_PRICE, index_id, start_date, today, token)
+    except QuotaExhaustedError:
+        result["status"] = "quota_exhausted"
+        return result
+
+    if df.empty:
+        result["status"] = "no_data"
+        return result
+
+    with sqlite3.connect(db_path) as conn:
+        rows = _upsert_index(conn, df, index_id)
+        conn.commit()
+
+    result["rows"] = rows
+    return result
+
+
+def download_index_backfill(db_path: str, token: str, target_start: str,
+                             index_id: str = INDEX_ID) -> Dict[str, object]:
+    """往回補 TAIEX（只有一個 data_id，不用逐檔迴圈，直接一次查詢）。"""
+    result = {"index_id": index_id, "rows": 0, "status": "ok"}
+
+    with sqlite3.connect(db_path) as conn:
+        min_date = _get_min_date_index(conn, index_id)
+
+    if min_date is None:
+        result["status"] = "no_existing_data"
+        return result
+
+    if min_date <= target_start:
+        result["status"] = "already_covered"
+        return result
+
+    end_date = (datetime.strptime(min_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    try:
+        df = _fetch(DATASET_PRICE, index_id, target_start, end_date, token)
     except QuotaExhaustedError:
         result["status"] = "quota_exhausted"
         return result
@@ -514,6 +604,141 @@ def _download_margin_all(db_path: str, token: str, start: str, force: bool,
         logger.warning(f"⚠️  失敗的股票（{len(failed_stocks)}）：{', '.join(failed_stocks[:10])}")
 
 
+def _download_taiex_backfill(db_path: str, token: str, target_start: str) -> bool:
+    """回傳 True 表示正常結束（含用盡重試上限後放棄），False 表示應該中止整個流程。"""
+    cycle = 0
+    while True:
+        result = download_index_backfill(db_path, token, target_start)
+        if result["status"] != "quota_exhausted":
+            logger.info(f"   TAIEX 往回補：{result['status']}，新增 {result['rows']} 筆")
+            return True
+
+        cycle += 1
+        if cycle > MAX_QUOTA_RETRY_CYCLES:
+            logger.error(
+                f"❌ TAIEX 往回補已嘗試 {MAX_QUOTA_RETRY_CYCLES} 個時間窗口仍配額不足，"
+                f"需要人工確認。重新執行同一指令可繼續（已完成的部分不會重抓）。"
+            )
+            return False
+        _hibernate_until_next_window(processed=0, total=1, cycle=cycle)
+
+
+def _download_margin_backfill_all(db_path: str, token: str, target_start: str,
+                                   sid_filter: Optional[str]) -> None:
+    stock_ids = [sid_filter] if sid_filter else get_stock_list(db_path)
+    if not stock_ids:
+        logger.error("❌ load_manifest 為空！請先執行：python run.py --step 1")
+        return
+
+    logger.info(
+        f"📥 開始往回補融資融券資料"
+        f"\n   股票數：{len(stock_ids)}"
+        f"\n   目標起始日：{target_start}"
+    )
+
+    success, fail, skip, total_rows = 0, 0, 0, 0
+    no_existing = 0
+    failed_stocks: List[str] = []
+    start_time = time.time()
+    last_heartbeat = time.time()
+    quota_cycle = 0
+
+    pbar = tqdm(total=len(stock_ids), desc="融資融券(往回補)", unit="檔")
+    i = 0
+    try:
+        while i < len(stock_ids):
+            sid = stock_ids[i]
+            try:
+                result = download_margin_one_backfill(sid, db_path, token, target_start)
+                status = result["status"]
+
+                if status == "quota_exhausted":
+                    quota_cycle += 1
+                    if quota_cycle > MAX_QUOTA_RETRY_CYCLES:
+                        logger.error(
+                            f"❌ 已嘗試 {MAX_QUOTA_RETRY_CYCLES} 個時間窗口仍配額不足，需要人工確認。"
+                            f"已處理 {i}/{len(stock_ids)} 檔（成功 {success}）。"
+                            f"重新執行同一指令可繼續（已完成的部分不會重抓）。"
+                        )
+                        return
+                    _hibernate_until_next_window(processed=i, total=len(stock_ids), cycle=quota_cycle)
+                    continue
+
+                if status == "ok":
+                    success += 1
+                    total_rows += result["rows"]
+                elif status in ("already_covered", "no_data"):
+                    skip += 1
+                elif status == "no_existing_data":
+                    no_existing += 1
+                else:
+                    fail += 1
+                    failed_stocks.append(sid)
+
+            except Exception as e:
+                fail += 1
+                failed_stocks.append(sid)
+                logger.warning(f"  [{sid}] ✗ 異常：{e}")
+
+            quota_cycle = 0
+            i += 1
+            pbar.update(1)
+
+            if time.time() - last_heartbeat > 600:
+                logger.info(
+                    f"💓 心跳：{i}/{len(stock_ids)} 檔，"
+                    f"✓{success} ⊘{skip} ✗{fail} 略過{no_existing}"
+                )
+                last_heartbeat = time.time()
+    finally:
+        pbar.close()
+
+    elapsed = time.time() - start_time
+
+    with sqlite3.connect(db_path) as conn:
+        total_count, distinct_stocks = conn.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT stock_id) FROM margin_trading"
+        ).fetchone()
+        new_min = conn.execute("SELECT MIN(date) FROM margin_trading").fetchone()[0]
+
+    logger.info(
+        f"\n✅ 融資融券往回補完成"
+        f"\n   耗時：{elapsed:.1f}s"
+        f"\n   新增：{total_rows:,} 筆"
+        f"\n   統計：{distinct_stocks} 檔股票，共 {total_count:,} 筆記錄，"
+        f"目前最早日期：{new_min}"
+        f"\n   成功：{success} / 失敗：{fail} / 已覆蓋或無資料：{skip} / "
+        f"略過(原本無此股票資料)：{no_existing}"
+    )
+    if failed_stocks:
+        logger.warning(f"⚠️  失敗的股票（{len(failed_stocks)}）：{', '.join(failed_stocks[:10])}")
+
+
+def download_all_supplementary_backfill(db_path: str, token: str, target_start: str,
+                                         sid_filter: Optional[str] = None,
+                                         skip_margin: bool = False,
+                                         skip_index: bool = False) -> None:
+    """
+    往回補資料的批次入口（2026-08-19 資料範圍延伸決定，見
+    docs/DATA_AVAILABILITY.md／docs/DECISIONS.md）。只補「比 DB 現有最早
+    日期更早、直到 target_start」的區間，不影響既有的 2015-2026 資料。
+
+    全程持有跟 download_all_supplementary() 相同的 download_lock，確保不會
+    有一個 process 在往前增量、另一個在往回延伸，同時打同一個 FINMIND_TOKEN。
+    """
+    with download_lock("download_supplementary.py"):
+        init_tables(db_path)
+
+        if not skip_index:
+            logger.info("📈 往回補大盤指數 TAIEX...")
+            ok = _download_taiex_backfill(db_path, token, target_start)
+            if not ok:
+                return
+
+        if not skip_margin:
+            _download_margin_backfill_all(db_path, token, target_start, sid_filter)
+
+
 def download_all_supplementary(db_path: str, token: str, start: str = DEFAULT_START,
                                 force: bool = False, sid_filter: Optional[str] = None,
                                 skip_margin: bool = False, skip_index: bool = False) -> None:
@@ -560,6 +785,11 @@ if __name__ == "__main__":
     parser.add_argument("--force", action="store_true", help="忽略斷點續傳，強制從 --start 重新下載")
     parser.add_argument("--skip-margin", action="store_true", help="跳過融資融券")
     parser.add_argument("--skip-index", action="store_true", help="跳過 TAIEX")
+    parser.add_argument(
+        "--backfill-to", type=str, default=None,
+        help="往回補資料模式：把現有最早日期往前補到這個日期為止"
+             "（例如 --backfill-to 2012-05-02），不影響既有資料，忽略 --start/--force"
+    )
     args = parser.parse_args()
 
     logger.remove()
@@ -571,12 +801,22 @@ if __name__ == "__main__":
         logger.error("❌ 環境變數 FINMIND_TOKEN 未設定")
         sys.exit(1)
 
-    download_all_supplementary(
-        db_path     = DB_PATH,
-        token       = token,
-        start       = args.start,
-        force       = args.force,
-        sid_filter  = args.sid,
-        skip_margin = args.skip_margin,
-        skip_index  = args.skip_index,
-    )
+    if args.backfill_to:
+        download_all_supplementary_backfill(
+            db_path      = DB_PATH,
+            token        = token,
+            target_start = args.backfill_to,
+            sid_filter   = args.sid,
+            skip_margin  = args.skip_margin,
+            skip_index   = args.skip_index,
+        )
+    else:
+        download_all_supplementary(
+            db_path     = DB_PATH,
+            token       = token,
+            start       = args.start,
+            force       = args.force,
+            sid_filter  = args.sid,
+            skip_margin = args.skip_margin,
+            skip_index  = args.skip_index,
+        )

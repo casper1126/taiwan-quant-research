@@ -23,10 +23,12 @@ from sklearn.metrics import roc_auc_score
 
 FUTURE_WINDOW = 20
 CRASH_THRESHOLD = -0.05
-# 2015 一整年就有 45 個崩盤標籤日（>=20 的訓練門檻），所以從 2016 開始
-# 就能訓練；真正限制整體機制輸出起點的是 hmm_detector.py 的 504 天
-# 最小歷史窗口（約落在 2017-04），這裡不需要比它更保守。
-FIRST_TEST_YEAR = 2016
+# 2026-08-19 資料範圍延伸到 2012-05-02 後重新校準（見 docs/DATA_AVAILABILITY.md）：
+# 2012（部分年，5-12月）17 個崩盤標籤、2013 年 7 個，單一年份都不到 20 筆的
+# 訓練門檻，但合併 2012+2013 有 24 筆，足夠訓練後預測 2014。真正限制整體
+# 機制輸出起點的是 hmm_detector.py 的 504 天最小歷史窗口（資料從 2012-05-02
+# 起算，約落在 2014 年中），這裡不需要比它更保守，設在 2014 剛好貼齊。
+FIRST_TEST_YEAR = 2014
 
 
 def build_features(index_close: pd.Series, indicators: Dict[str, pd.Series]) -> pd.DataFrame:

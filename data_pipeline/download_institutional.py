@@ -340,6 +340,15 @@ def _get_last_date(conn: sqlite3.Connection, stock_id: str) -> Optional[str]:
     return None
 
 
+def _get_min_date(conn: sqlite3.Connection, stock_id: str) -> Optional[str]:
+    """查詢 DB 裡某支股票目前最早的法人資料日期（往回補資料用）。"""
+    row = conn.execute(
+        "SELECT MIN(date) FROM institutional_investors WHERE stock_id = ?",
+        (stock_id,)
+    ).fetchone()
+    return row[0] if row and row[0] else None
+
+
 def _upsert(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     """
     批次寫入 institutional_investors，回傳寫入筆數。
@@ -468,6 +477,175 @@ def download_one(stock_id: str, db_path: str, token: str,
     
     result["rows"] = rows
     return result
+
+
+def download_one_backfill(stock_id: str, db_path: str, token: str,
+                          target_start: str) -> Dict[str, object]:
+    """
+    往回補資料（跟 download_one 方向相反）：只抓「比 DB 現有最早日期更早、
+    直到 target_start」的區間，不動已經有的資料，也不往「今天」的方向抓。
+
+    用於 2026-08-19 的資料範圍延伸決定（docs/DATA_AVAILABILITY.md）：
+    把系統起始日從 2015-01-01 延伸到三大法人資料真實可得的 2012-05-02。
+
+    Returns
+    -------
+    dict：status 可能是
+      "ok"                成功寫入新資料
+      "already_covered"   DB 現有最早日期已經 <= target_start，不用補
+      "no_existing_data"  這支股票在 institutional_investors 完全沒有資料
+                          （表示原本的 2015-2026 回填就沒有這支股票，通常是
+                          真的沒有法人交易資格，這裡刻意不處理，避免對從來
+                          沒驗證過的股票做全新的大範圍下載，超出這次延伸的
+                          既定範圍）
+      "no_data"           FinMind 明確回應這段區間沒有資料
+      "quota_exhausted"   402 配額用盡，跟 download_one 一樣不算失敗
+    """
+    result = {"stock_id": stock_id, "rows": 0, "status": "ok"}
+
+    with sqlite3.connect(db_path) as conn:
+        min_date = _get_min_date(conn, stock_id)
+
+    if min_date is None:
+        result["status"] = "no_existing_data"
+        return result
+
+    if min_date <= target_start:
+        result["status"] = "already_covered"
+        return result
+
+    end_date = (datetime.strptime(min_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    try:
+        df = _fetch(stock_id, target_start, end_date, token)
+    except QuotaExhaustedError:
+        result["status"] = "quota_exhausted"
+        return result
+
+    if df.empty:
+        result["status"] = "no_data"
+        return result
+
+    with sqlite3.connect(db_path) as conn:
+        rows = _upsert(conn, df)
+        conn.commit()
+
+    result["rows"] = rows
+    return result
+
+
+def download_all_backfill(db_path: str, token: str, target_start: str,
+                          sid_filter: Optional[str] = None) -> None:
+    """
+    往回補資料的批次入口，只支援單一 process 順序模式（跟主流程的
+    workers=1 一樣有完整的自動休眠/恢復機制；往回補資料是一次性的既定範圍
+    工作，不需要並行模式的複雜度）。
+
+    全程持有 download_lock，跟 download_all() 共用同一把鎖檔——確保不會
+    有一個 process 在往前增量、另一個在往回延伸，同時打同一個 FINMIND_TOKEN。
+    """
+    with download_lock("download_institutional.py"):
+        init_table(db_path)
+
+        stock_ids = [sid_filter] if sid_filter else get_stock_list(db_path)
+        if not stock_ids:
+            logger.error("❌ load_manifest 為空！請先執行：python run.py --step 1")
+            return
+
+        logger.info(
+            f"📥 開始往回補三大法人資料"
+            f"\n   股票數：{len(stock_ids)}"
+            f"\n   目標起始日：{target_start}"
+        )
+
+        success, fail, skip, total_rows = 0, 0, 0, 0
+        no_existing = 0
+        failed_stocks: List[str] = []
+        start_time = time.time()
+        last_heartbeat = time.time()
+        quota_cycle = 0
+        i = 0
+
+        while i < len(stock_ids):
+            sid = stock_ids[i]
+            try:
+                result = download_one_backfill(sid, db_path, token, target_start)
+                status = result.get("status")
+                rows = result.get("rows", 0)
+
+                if status == "quota_exhausted":
+                    quota_cycle += 1
+                    if quota_cycle > MAX_QUOTA_RETRY_CYCLES:
+                        logger.error(
+                            f"❌ 已嘗試 {MAX_QUOTA_RETRY_CYCLES} 個整點週期仍配額不足，"
+                            f"需要人工確認。已處理 {i}/{len(stock_ids)} 檔（成功 {success}）。"
+                            f"重新執行同一指令可從 checkpoint 續跑（往回補資料以 DB 現有"
+                            f"最早日期為準，已完成的部分不會重抓）。"
+                        )
+                        return
+                    wake_at = _next_hour_boundary() + timedelta(seconds=5)
+                    logger.warning(
+                        f"⏸️  額度耗盡於 {datetime.now():%H:%M:%S}，"
+                        f"已處理 {i}/{len(stock_ids)} 檔，將於 {wake_at:%H:%M:%S} "
+                        f"自動恢復（第 {quota_cycle}/{MAX_QUOTA_RETRY_CYCLES} 次）"
+                    )
+                    sleep_with_heartbeat(wake_at, i, len(stock_ids))
+                    with _rate_limiter.lock:
+                        _rate_limiter.request_times.clear()
+                    logger.info(f"▶️  已恢復，從第 {i + 1} 檔繼續")
+                    continue
+
+                if status == "ok":
+                    success += 1
+                    total_rows += rows
+                elif status in ("already_covered", "no_data"):
+                    skip += 1
+                elif status == "no_existing_data":
+                    no_existing += 1
+                else:
+                    fail += 1
+                    failed_stocks.append(sid)
+
+            except Exception as e:
+                fail += 1
+                failed_stocks.append(sid)
+                logger.warning(f"  [{sid}] ✗ 異常：{e}")
+
+            quota_cycle = 0
+            i += 1
+
+            if i % 20 == 0:
+                logger.info(
+                    f"  進度 {i}/{len(stock_ids)} "
+                    f"✓{success} ✗{fail} ⊘{skip} 略過(無既有資料){no_existing} "
+                    f"(共 {total_rows:,} 筆)"
+                )
+            if time.time() - last_heartbeat > 600:
+                logger.info(
+                    f"💓 心跳：{i}/{len(stock_ids)} 檔，"
+                    f"✓{success} ⊘{skip} ✗{fail} 略過{no_existing}"
+                )
+                last_heartbeat = time.time()
+
+        elapsed = time.time() - start_time
+
+        with sqlite3.connect(db_path) as conn:
+            total_count, distinct_stocks = conn.execute(
+                "SELECT COUNT(*), COUNT(DISTINCT stock_id) FROM institutional_investors"
+            ).fetchone()
+            new_min = conn.execute("SELECT MIN(date) FROM institutional_investors").fetchone()[0]
+
+        logger.info(
+            f"\n✅ 往回補資料完成"
+            f"\n   耗時：{elapsed:.1f}s"
+            f"\n   新增：{total_rows:,} 筆"
+            f"\n   統計：{distinct_stocks} 檔股票，共 {total_count:,} 筆記錄，"
+            f"目前最早日期：{new_min}"
+            f"\n   成功：{success} / 失敗：{fail} / 已覆蓋或無資料：{skip} / "
+            f"略過(原本無此股票資料)：{no_existing}"
+        )
+        if failed_stocks:
+            logger.warning(f"⚠️  失敗的股票（{len(failed_stocks)}）：{', '.join(failed_stocks[:10])}")
 
 
 def get_top_n_universe(db_path: str, top_n: int,
@@ -725,6 +903,11 @@ if __name__ == "__main__":
         "--top", type=int, default=None,
         help="只下載過去 365 日成交額前 N 檔（推薦每日用 --top 300，快 7×）"
     )
+    parser.add_argument(
+        "--backfill-to", type=str, default=None,
+        help="往回補資料模式：把每支股票現有最早日期往前補到這個日期為止"
+             "（例如 --backfill-to 2012-05-02），不影響既有資料，忽略 --start/--force"
+    )
     args = parser.parse_args()
 
     # 初始化日誌
@@ -745,13 +928,21 @@ if __name__ == "__main__":
         logger.error("\n   FinMind 免費帳號申請：https://finmindtrade.com/")
         sys.exit(1)
 
-    # 執行下載
-    download_all(
-        db_path    = DB_PATH,
-        token      = token,
-        start      = args.start,
-        force      = args.force,
-        sid_filter = args.sid,
-        workers    = args.workers,
-        top_n      = args.top,
-    )
+    if args.backfill_to:
+        download_all_backfill(
+            db_path      = DB_PATH,
+            token        = token,
+            target_start = args.backfill_to,
+            sid_filter   = args.sid,
+        )
+    else:
+        # 執行下載
+        download_all(
+            db_path    = DB_PATH,
+            token      = token,
+            start      = args.start,
+            force      = args.force,
+            sid_filter = args.sid,
+            workers    = args.workers,
+            top_n      = args.top,
+        )
