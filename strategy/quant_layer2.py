@@ -438,10 +438,13 @@ def build_positions(factors: dict,
                     inertia: float = 0.6,
                     max_pct_dv: Optional[float] = None,
                     regime_df: Optional[pd.DataFrame] = None,
-                    use_regime_weights: bool = False,
+                    use_regime_factor_weights: bool = False,
+                    use_regime_exposure: bool = False,
                     weighting: Optional[str] = None,
                     ml_scores: Optional[pd.DataFrame] = None,
-                    use_ml_composite: bool = False) -> pd.DataFrame:
+                    use_ml_composite: bool = False,
+                    use_fixed_weights: bool = False,
+                    fixed_weights: Optional[Dict[str, float]] = None) -> pd.DataFrame:
     """
     根據因子決定每天的持倉比例矩陣。
 
@@ -463,23 +466,35 @@ def build_positions(factors: dict,
       例如 top_n=30, buffer=1.5 → 進場閾值 30，出場閾值 45
       這讓已持倉的股票有更多空間，大幅降低邊界替換頻率。
 
-    ── Task 4：機制整合（regime_df / use_regime_weights）──────
+    ── Task 4：機制整合（regime_df / use_regime_factor_weights / use_regime_exposure）──
     regime_df 是 regime/regime_engine.py 的 run_regime_engine() 回傳的
     result_df（欄位含 'regime'、'exposure'），reindex 到 close.index 對齊。
 
-    use_regime_weights=False（預設）：跟 Task 2 一樣，用全期動態 IC 加權
-    合成因子分數，大盤擇時維持原本的二元開關（proxy vs 60 日均線）。
+    2026-08-22（Task 6 開工前）決定：原本 Task 4 的 `use_regime_weights`
+    一個開關同時控制兩件事（用什麼分數排名選股、要不要用曝險縮放），
+    這在 Task 6 要做 ablation D（ML 選股 + 機制曝險）時語意會衝突——
+    「選股用 ML」跟「機制動態調整因子比重」是同一層（排名依據），互斥
+    合理；但「曝險水位由機制決定」是另一層（資金配置比例），理論上
+    可以搭配任何一種選股方法。拆成兩個獨立開關，理由詳見
+    docs/DECISIONS.md（「Task 6 ablation D 語意決定」那筆）：
 
-    use_regime_weights=True：
-      4a. 每個再平衡日查當日機制（BULL/NEUTRAL/WARNING/BEAR），用
-          REGIME_FACTOR_WEIGHTS 對應的靜態權重合成當天的因子分數，
-          取代動態 IC 加權（機制標籤本身就是「當下該偏重哪些因子」的
-          判斷依據，不需要再疊加一層滾動 IC 權重）。
-      4b. 部位大小 = 選股結果（等權或風險平價）× 當日機制的建議曝險
-          比例（BULL 1.0／NEUTRAL 0.7／WARNING 0.4／BEAR 0.1），在
-          再平衡日鎖定、期間不動，取代原本「多頭才買入、空頭只賣不買」
-          的二元擇時開關——用連續的曝險縮放取代二元開關來控制風險，
-          選股邏輯（買賣哪些股票）本身不再因機制而改變。
+    - `use_regime_factor_weights`（原本 Task 4a 的功能，即「機制動態
+      調整因子比重」）：False（預設）跟 Task 2 一樣用全期動態 IC 加權
+      合成因子分數；True 則每個再平衡日查當日機制（BULL/NEUTRAL/
+      WARNING/BEAR），用 REGIME_FACTOR_WEIGHTS 對應的靜態權重合成當天
+      的因子分數，取代動態 IC 加權。跟 `use_ml_composite` 互斥（兩者
+      都是「用什麼分數排名選股」，同時開啟語意不明確）。
+    - `use_regime_exposure`（原本 Task 4b 的功能，即「機制建議曝險
+      水位」）：False（預設）維持原本二元大盤擇時開關（proxy vs 60 日
+      均線，多頭才買、空頭只賣不買）；True 則部位大小 = 選股結果
+      （等權或風險平價）× 當日機制建議曝險比例（BULL 1.0／NEUTRAL
+      0.7／WARNING 0.4／BEAR 0.1，再平衡日鎖定、期間不動），並且
+      「允許買入新股」永遠成立（風險控制交給連續的曝險縮放，不再靠
+      binary 開關擋買進，避免雙重收緊風險）。這個開關獨立於選股邏輯，
+      可以搭配動態 IC、機制靜態權重、或 ML 分數任何一種排名方法——
+      這正是 Task 6 ablation D（`use_ml_composite=True` +
+      `use_regime_factor_weights=False` + `use_regime_exposure=True`：
+      ML 選股、機制決定曝險）需要的組合。
 
     weighting：Task 4c 規格的字串介面（'equal'|'risk_parity'），如果有給
     值就覆蓋 use_risk_parity（等同 weighting=='risk_parity'）；沒給值就
@@ -491,16 +506,34 @@ def build_positions(factors: dict,
     呼叫端先算好再傳進來（quant_layer2.py 不 import ml_composite.py，
     維持單向依賴：ml_composite.py 可以 import quant_layer2.py，反過來
     不行）。use_ml_composite=True 時，每個再平衡日直接用 ml_scores 當天
-    的值排名選股，取代動態 IC 加權或機制靜態權重合成的複合分數；大盤
-    擇時（is_bull 二元開關）維持原本的邏輯不變——Task 5 只換「用什麼
-    分數排名」，不改變風控結構。跟 use_regime_weights 互斥（同時給
-    True 會丟例外，避免「兩種排名依據都要」這種未定義行為）。
+    的值排名選股，取代動態 IC 加權或機制靜態權重合成的複合分數。
+    跟 use_regime_factor_weights 互斥（同時給 True 會丟例外，避免
+    「兩種排名依據都要」這種未定義行為），但可以自由搭配
+    use_regime_exposure（見上方說明，這就是 Task 6 ablation D 的組合）。
+
+    ── Task 6b：固定權重（use_fixed_weights）──────────────────
+    預設的動態 IC 加權（`else` 分支）會逐日用 252 日滾動 |IC| 調整權重；
+    `active_default`（momentum 0.34／value 0.18／rev_yoy 0.18／
+    low_vol 0.30，依 Task 2 實測 IC 相對強弱訂出）原本只在資料不足時
+    當 fallback 用。`use_fixed_weights=True` 時，整個回測期間都直接用
+    這組固定權重，完全不計算滾動 IC——這是 Task 6b ablation A／B
+    （固定權重，不管有沒有機制）需要的「非動態」對照組：驗證「權重
+    會不會自動調整」這件事本身，對績效／回撤的影響有多大。跟
+    use_regime_factor_weights／use_ml_composite 互斥（三者都是決定
+    「用什麼分數排名選股」，同時開啟語意不明確）。
+
+    `fixed_weights`：只有 `use_fixed_weights=True` 時才有作用，預設
+    `None` 就是用 `active_default`（上面說的那組實測 IC 權重）；也可以
+    傳入自訂字典覆蓋（例如 Task 6d 的 attribution.py 要算「單因子版」
+    的邊際貢獻，就是傳 `{"momentum": 1.0}` 這種只給一個因子權重的字典
+    進來）。字典裡沒提到的 active 因子權重視為 0，不用每個因子都列。
     """
-    if use_ml_composite and use_regime_weights:
-        raise ValueError("use_ml_composite 與 use_regime_weights 不能同時為 True："
-                         "兩者都是決定「用什麼分數排名選股」的機制，同時開啟語意不明確。"
-                         "Task 6 的 ablation D（ML + 機制曝險）要結合兩者時，"
-                         "屆時再擴充明確的組合語意，不在 Task 5 範圍內。")
+    _scoring_modes = [use_ml_composite, use_regime_factor_weights, use_fixed_weights]
+    if sum(bool(m) for m in _scoring_modes) > 1:
+        raise ValueError("use_ml_composite／use_regime_factor_weights／use_fixed_weights "
+                         "最多只能開一個：三者都是決定「用什麼分數排名選股」的機制，同時"
+                         "開啟語意不明確。機制曝險（use_regime_exposure）不受此限制，可以"
+                         "跟任一種排名方法搭配，見 build_positions() docstring。")
     if use_ml_composite and ml_scores is None:
         raise ValueError("use_ml_composite=True 但沒有提供 ml_scores")
 
@@ -601,11 +634,20 @@ def build_positions(factors: dict,
     for k in active_default:
         active_default[k] = active_default[k] / total_def
 
-    missing_mask = weights_df.sum(axis=1).isna() | (weights_df.sum(axis=1) == 0)
-    if missing_mask.any():
-        for dt in weights_df.index[missing_mask]:
-            for name, w in active_default.items():
-                weights_df.at[dt, name] = w
+    if use_fixed_weights:
+        # Task 6b：整個回測期間都用固定權重，不計算/不使用滾動 IC。
+        # fixed_weights 沒給就用 active_default；有給就用呼叫端提供的字典
+        # （沒列到的 active 因子權重視為 0），見 Task 6d attribution.py
+        # 的單因子版用法。
+        weights_to_use = fixed_weights if fixed_weights is not None else active_default
+        for name in active_factors:
+            weights_df[name] = weights_to_use.get(name, 0.0)
+    else:
+        missing_mask = weights_df.sum(axis=1).isna() | (weights_df.sum(axis=1) == 0)
+        if missing_mask.any():
+            for dt in weights_df.index[missing_mask]:
+                for name, w in active_default.items():
+                    weights_df.at[dt, name] = w
 
     # 計算每個因子的 cross-sectional zscore
     cz = {name: cross_zscore(factor_map[name]) for name in active_factors}
@@ -618,7 +660,7 @@ def build_positions(factors: dict,
 
     masked_composite = composite.where(valid, np.nan)
 
-    # ── Task 4a：機制靜態權重合成（只有 use_regime_weights=True 才用）──
+    # ── Task 4a：機制靜態權重合成（只有 use_regime_factor_weights=True 才用）──
     # 只有四個核心因子（momentum/value/rev_yoy/low_vol）有定義在
     # REGIME_FACTOR_WEIGHTS 裡；mom_120、div_yld 不是任務書規格因子，
     # 機制模式下權重視為 0（不參與），跟動態 IC 模式的 fallback 邏輯一致。
@@ -668,25 +710,26 @@ def build_positions(factors: dict,
     for day_idx in rebal_idx:
         today = close.index[day_idx]
 
-        if use_regime_weights:
-            # 4b：選股邏輯不再因機制而暫停買入，風險控制交給曝險縮放
-            # （下面 target_pos 會乘上 exposure），所以這裡永遠視為「可以買」。
-            is_bull = True
+        # ── 排名依據：機制靜態權重／ML／動態 IC 三選一（互斥）──────
+        if use_regime_factor_weights:
             scores_today = _regime_scores_today(today)
-            _, exposure_today = _regime_state_and_exposure(regime_df, today)
         elif use_ml_composite:
-            # Task 5：排名依據換成 ml_scores（LightGBM 預測分數），大盤
-            # 擇時、曝險邏輯維持跟動態 IC 加權一樣（is_bull 二元開關，
-            # exposure 固定 1.0），只有「用什麼分數排名」不一樣。
-            is_bull = timing_stepped.loc[today] >= 0.5
             if today in ml_scores.index:
                 scores_today = ml_scores.reindex(columns=cols).loc[today].where(valid.loc[today], np.nan)
             else:
                 scores_today = pd.Series(np.nan, index=cols)
-            exposure_today = 1.0
+        else:
+            scores_today = masked_composite.loc[today]
+
+        # ── 曝險水位：獨立開關，可以搭配上面任何一種排名依據 ────────
+        # （2026-08-22 從 use_regime_weights 拆出來，見 docstring）
+        if use_regime_exposure:
+            # 風險控制交給連續的曝險縮放，不再靠 binary 開關擋買進，
+            # 避免雙重收緊風險。
+            is_bull = True
+            _, exposure_today = _regime_state_and_exposure(regime_df, today)
         else:
             is_bull = timing_stepped.loc[today] >= 0.5
-            scores_today = masked_composite.loc[today]
             exposure_today = 1.0
 
         rank_today = scores_today.rank(ascending=False)
@@ -716,11 +759,11 @@ def build_positions(factors: dict,
             else:
                 target_pos[holds_list] = eq_weight
 
-            # 4b：機制模式下，目標權重整個乘上當日曝險比例——選股結果本身
-            # 不變（還是等權/風險平價分給 top_n 檔），但整體部位規模隨機制
-            # 縮放（BULL 1.0 全倉 ~ BEAR 0.1 幾乎空手），沒用掉的部分留白
-            # （視為現金），在再平衡日決定、期間不會再變動。
-            if use_regime_weights:
+            # 4b：機制曝險模式下，目標權重整個乘上當日曝險比例——選股結果
+            # 本身不變（還是等權/風險平價分給 top_n 檔），但整體部位規模
+            # 隨機制縮放（BULL 1.0 全倉 ~ BEAR 0.1 幾乎空手），沒用掉的
+            # 部分留白（視為現金），在再平衡日決定、期間不會再變動。
+            if use_regime_exposure:
                 target_pos = target_pos * exposure_today
 
             # 權重平滑：new = inertia*prev + (1-inertia)*target
@@ -753,7 +796,7 @@ def build_positions(factors: dict,
                 # 機制模式下刻意不做這個 renormalize：new_pos 的總和本來就
                 # 應該等於 exposure_today（< 1 代表刻意保留現金部位控制
                 # 風險），重新正規化回 1 會把曝險縮放的效果整個抵銷掉。
-                if not use_regime_weights and new_pos.sum() > 0:
+                if not use_regime_exposure and new_pos.sum() > 0:
                     new_pos = new_pos / new_pos.sum()
                 pos_timed.loc[today] = new_pos.values
                 last_rebal_pos = new_pos
@@ -948,18 +991,23 @@ def run_pipeline(top_n: Optional[int] = None,
                  slippage: Optional[float] = None,
                  save_equity_path: Optional[str] = None,
                  regime_df: Optional[pd.DataFrame] = None,
-                 use_regime_weights: Optional[bool] = None,
+                 use_regime_factor_weights: Optional[bool] = None,
+                 use_regime_exposure: Optional[bool] = None,
                  weighting: Optional[str] = None,
                  ml_scores: Optional[pd.DataFrame] = None,
-                 use_ml_composite: Optional[bool] = None) -> Tuple[dict, pd.Series, pd.DataFrame]:
+                 use_ml_composite: Optional[bool] = None,
+                 use_fixed_weights: Optional[bool] = None,
+                 fixed_weights: Optional[Dict[str, float]] = None) -> Tuple[dict, pd.Series, pd.DataFrame]:
     """
     Run the full pipeline with optional parameter overrides.
 
-    regime_df/use_regime_weights：Task 4 機制整合，見 build_positions() 的
-    docstring。regime_df 由呼叫端先跑 regime/regime_engine.py 的
-    run_regime_engine() 取得（quant_layer2.py 本身不 import regime/，
-    維持 Task 3-4 一開始定案的單向依賴：regime/ 不依賴 quant_layer2.py，
-    但 quant_layer2.py 可以被動接受它的輸出）。
+    regime_df/use_regime_factor_weights/use_regime_exposure：Task 4 機制
+    整合，2026-08-22 拆成兩個獨立開關（見 build_positions() 的 docstring
+    與 docs/DECISIONS.md「Task 6 ablation D 語意決定」）。regime_df 由
+    呼叫端先跑 regime/regime_engine.py 的 run_regime_engine() 取得
+    （quant_layer2.py 本身不 import regime/，維持 Task 3-4 一開始定案的
+    單向依賴：regime/ 不依賴 quant_layer2.py，但 quant_layer2.py 可以
+    被動接受它的輸出）。
 
     ml_scores/use_ml_composite：Task 5 ML 因子合成，見 build_positions() 的
     docstring。ml_scores 由呼叫端先跑 strategy/ml_composite.py 的
@@ -977,8 +1025,10 @@ def run_pipeline(top_n: Optional[int] = None,
     commission = COMMISSION if commission is None else commission
     tax = TAX if tax is None else tax
     slippage = SLIPPAGE if slippage is None else slippage
-    use_regime_weights = False if use_regime_weights is None else use_regime_weights
+    use_regime_factor_weights = False if use_regime_factor_weights is None else use_regime_factor_weights
+    use_regime_exposure = False if use_regime_exposure is None else use_regime_exposure
     use_ml_composite = False if use_ml_composite is None else use_ml_composite
+    use_fixed_weights = False if use_fixed_weights is None else use_fixed_weights
 
     # Step 1：載入資料
     data = load_matrices(DB_PATH, START_DATE, END_DATE)
@@ -1004,10 +1054,13 @@ def run_pipeline(top_n: Optional[int] = None,
         inertia=inertia,
         max_pct_dv=max_pct_dv,
         regime_df=regime_df,
-        use_regime_weights=use_regime_weights,
+        use_regime_factor_weights=use_regime_factor_weights,
+        use_regime_exposure=use_regime_exposure,
         weighting=weighting,
         ml_scores=ml_scores,
         use_ml_composite=use_ml_composite,
+        use_fixed_weights=use_fixed_weights,
+        fixed_weights=fixed_weights,
     )
 
     # Step 5：回測

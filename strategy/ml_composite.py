@@ -125,26 +125,22 @@ def build_target(close: pd.DataFrame, fwd_days: int = FWD_DAYS) -> pd.DataFrame:
     return fwd_ret.rank(axis=1, pct=True)
 
 
-def build_market_features(close_index: pd.DatetimeIndex,
-                          start: str = "2012-05-02",
-                          end: str = END_DATE) -> pd.DataFrame:
+def _market_features_from_regime_output(regime_df: pd.DataFrame, extras: dict,
+                                         close_index: pd.DatetimeIndex) -> pd.DataFrame:
+    """把 regime_engine.run_regime_engine() 的輸出轉成機制 one-hot（4 欄）＋
+    大盤波動分位（1 欄），reindex 到 close_index。抽成獨立函式是因為
+    Task 6（strategy/ablation.py）需要跟這裡用「同一次」regime_engine 執行
+    結果（不重跑一次——regime_engine 內部的 LightGBM 崩盤預警在不同次執行
+    間有輕微不確定性，見 docs/PROJECT_STATUS.md 的環境注意事項，同一份
+    market_features 才能保證 ablation 的 D 版跟其他版本用的是同一個機制
+    標籤序列，不是兩份微幅不同的版本）。
+
+    機制尚未暖機完成（regime 為 NaN，見 regime/hmm_detector.py 的 504 天
+    門檻）的早期日期，one-hot 全部填 0——這代表「當下沒有機制資訊可用」，
+    不是猜一個特定狀態，跟 quant_layer2.py 的 _regime_state_and_exposure()
+    fallback 到 NEUTRAL 是不同的處理：這裡是特徵輸入，讓模型自己學會
+    「這個情況下沒有機制資訊」，而不是餵一個可能誤導模型的假訊號。
     """
-    機制 one-hot（4 欄）＋大盤波動分位（1 欄），reindex 到 close_index。
-
-    機制標籤來自完整跑一次 regime/regime_engine.py（含 HMM／health
-    score／ml_alert，需要幾分鐘）。機制尚未暖機完成（regime 為 NaN，
-    見 regime/hmm_detector.py 的 504 天門檻）的早期日期，one-hot 全部
-    填 0——這代表「當下沒有機制資訊可用」，不是猜一個特定狀態，跟
-    quant_layer2.py 的 _regime_state_and_exposure() fallback 到
-    NEUTRAL 是不同的處理：這裡是特徵輸入，讓模型自己學會「這個情況下
-    沒有機制資訊」，而不是餵一個可能誤導模型的假訊號。
-
-    大盤波動分位直接重用 regime/indicators.py 的 realized_vol_percentile
-    輸出（跟健康分數用的是同一個指標，避免重算兩次不一致的版本）。
-    """
-    logger.info("ml_composite：跑 regime_engine 取得機制標籤 + 大盤波動分位（可能需要幾分鐘）...")
-    regime_df, extras = regime_engine.run_regime_engine(start=start, end=end, run_ml_alert=True)
-
     one_hot = pd.get_dummies(regime_df["regime"]).reindex(columns=REGIME_STATES, fill_value=0.0)
     one_hot = one_hot.reindex(close_index).fillna(0.0)
     one_hot.columns = [f"regime_{c}" for c in one_hot.columns]
@@ -154,6 +150,22 @@ def build_market_features(close_index: pd.DatetimeIndex,
     market_features = one_hot
     market_features["mkt_vol_pctile"] = mkt_vol_pctile
     return market_features
+
+
+def build_market_features(close_index: pd.DatetimeIndex,
+                          start: str = "2012-05-02",
+                          end: str = END_DATE) -> pd.DataFrame:
+    """
+    機制 one-hot（4 欄）＋大盤波動分位（1 欄），reindex 到 close_index。
+
+    機制標籤來自完整跑一次 regime/regime_engine.py（含 HMM／health
+    score／ml_alert，需要幾分鐘）。大盤波動分位直接重用
+    regime/indicators.py 的 realized_vol_percentile 輸出（跟健康分數用
+    的是同一個指標，避免重算兩次不一致的版本）。
+    """
+    logger.info("ml_composite：跑 regime_engine 取得機制標籤 + 大盤波動分位（可能需要幾分鐘）...")
+    regime_df, extras = regime_engine.run_regime_engine(start=start, end=end, run_ml_alert=True)
+    return _market_features_from_regime_output(regime_df, extras, close_index)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -242,9 +254,18 @@ def walk_forward_ml_composite(
     end: str = END_DATE,
     train_stride: int = TRAIN_DATE_STRIDE,
     min_train_days: int = MIN_TRAIN_DAYS,
+    regime_df: Optional[pd.DataFrame] = None,
+    regime_extras: Optional[dict] = None,
 ) -> Tuple[pd.DataFrame, List[Dict], Dict[str, pd.DataFrame]]:
     """
     完整跑一次 Task 5 的 walk-forward ML 因子合成。
+
+    regime_df/regime_extras：可選，Task 6（strategy/ablation.py）需要
+    ablation D 的 ML 特徵跟其他版本的機制曝險用「同一次」
+    regime_engine.run_regime_engine() 執行結果，兩者都給時就不重跑一次
+    （regime_engine 內部的 LightGBM 崩盤預警重跑會有輕微數值不確定性，
+    見 _market_features_from_regime_output() 的說明）。不給就照 Task 5
+    原本的行為，自己跑一次。
 
     回傳：
       predictions   : pd.DataFrame(date x stock_id)，OOS 預測分數
@@ -262,7 +283,10 @@ def walk_forward_ml_composite(
 
     factor_mats = build_factor_matrices(data)
     target = build_target(close, FWD_DAYS)
-    market_features = build_market_features(close.index, start="2012-05-02", end=end)
+    if regime_df is not None and regime_extras is not None:
+        market_features = _market_features_from_regime_output(regime_df, regime_extras, close.index)
+    else:
+        market_features = build_market_features(close.index, start="2012-05-02", end=end)
 
     all_dates = close.index
     years = sorted(set(all_dates.year))

@@ -6,6 +6,199 @@
 
 ---
 
+## 2026-08-22～2026-08-23 — Task 6：驗證框架完整結果（Walk-Forward／Ablation／統計顯著性／歸因）
+
+**狀態：Task 6 完成，四份報告全部真實產出，誠實記錄一項重要的負面發現**
+
+**6a Walk-Forward（`reports/walk_forward_results.{md,json}`）**：訓練
+[2015-01-01, y-1] → 測試 [y]，y=2020..2025，共 6 fold，每個 fold 的
+因子權重只用訓練期資料算 ICIR 比例、凍結後套用到測試年（真正的
+train/test split，不是每天重新調整）。結果：2020 +2.2%／2021
++25.9%／2022 -13.3%／2023 +18.6%／2024 +7.2%／2025 -1.2%，
+**4/6 正報酬，通過驗收標準**。整體 OOS（逐日串接）年化 +5.7%，
+Sharpe 0.288，MDD -26.3%。
+
+**6b Ablation（`reports/ablation_results.md`）**：A 固定權重無機制／
+B 固定權重+機制曝險／C 動態權重+機制曝險／D ML+機制曝險，同一段回測
+期間（2015-01～2026-04）、同樣 top_n/rebal_freq/成本參數同條件對照，
+B/C/D 共用同一次 `regime_engine.run_regime_engine()` 輸出（避免機制
+標籤序列不一致）：
+
+| 版本 | 總報酬 | 年化報酬 | Sharpe | MDD | 年化換手率 |
+|---|---:|---:|---:|---:|---:|
+| A 固定權重無機制 | +68.7% | +5.1% | 0.301 | -24.2% | 223.8% |
+| B 固定權重+機制曝險 | +14.8% | +1.3% | -0.054 | -11.1% | 72.8% |
+| C 動態權重+機制曝險 | +17.2% | +1.5% | 0.011 | -10.8% | 76.0% |
+| D ML+機制曝險 | +10.1% | +1.3% | -0.089 | -10.1% | 64.4% |
+
+驗收標準：**B 版 MDD 比 A 改善 ≥25%** → 實測改善 54.2%（-24.2%→-11.1%），
+**✅ 通過，且遠超門檻**。**B 版 Sharpe ≥ A − 0.1**（門檻 0.201）→ 實測
+B=-0.054，**❌ 未通過**。這跟 Task 4 已經記錄過的發現一致：機制曝險
+在這段歷史性大多頭期間會大幅犧牲報酬（換來波動度與回撤大幅降低），
+MDD 改善非常顯著但 Sharpe 不升反降——不是實作問題，是同一個風險/
+報酬取捨在 Task 6 用更嚴謹的同條件對照方法又驗證了一次。
+
+**6c 統計顯著性（`reports/significance_report.md`）**：針對 Task 2
+基準策略（動態 IC 加權，年化 6.46%、Sharpe 0.393）：
+- **Deflated Sharpe Ratio**（n_trials=8，這個專案真正做過的 8 個策略
+  變體，見報告列表）：**0.4190**，未達顯著門檻（>0.95）
+- **Sharpe 95% 信賴區間**（Lo 2002）：[-0.056, 1.132]，**包含 0**，
+  不顯著——不能排除真實 Sharpe 是 0 或負的可能性
+- **Bootstrap p-value**（策略 vs TAIEX buy-and-hold，10000 次重抽樣）：
+  **p=0.0272，顯著**——但這是一個**負面**的顯著結果：策略逐日報酬
+  顯著地**輸給** TAIEX 買進持有（年化落後約 7.4 個百分點），不是贏過
+
+三項檢定裡唯一顯著的是「策略顯著跑輸大盤」，這跟這段回測期間台股
+經歷史詩級大多頭（Task 3/4 已經記錄過，TAIEX 從約 9000 點漲到約
+47000 點）直接相關——量化策略的相對報酬優勢通常來自風險調整後的
+表現與危機期的抗跌能力，不是絕對報酬跑贏一段史詩級單邊多頭的大盤，
+但誠實地說，這個檢定結果代表：**如果只看「這段期間賺得比大盤多不多」
+這個最直觀的標準，基準策略是輸的**，需要在 README 的 Limitations
+如實揭露，不能只強調風險調整後指標。
+
+**6d 績效歸因（`reports/attribution_report.md`）**：對 Task 2 固定
+權重版做「總報酬 = Σ各因子邊際貢獻 + 擇時貢獻 − 成本 + 殘差」的恆等式
+分解（不是估計，四項相減定義、加總保證等於總報酬，程式內建
+`identity_check` 斷言，跑出來確認通過）。完整版淨總報酬 +68.7%：
+momentum 貢獻最大（+31.0%，複合權重 0.34），rev_yoy 貢獻最小
+（+6.5%，複合權重 0.18）；擇時貢獻 +27.7%；成本拖累 -8.3%；殘差
+-10.0%（代表因子合成後統一排名選股，比單獨用每個因子各自選股再
+加權平均報酬還差一點，緩衝區/inertia 等非線性機制在這段期間有輕微
+負面效果）。
+
+**過程中發現並修正的一個 bug（誠實記錄，不是事後美化）**：
+`significance.py` 的 `deflated_sharpe_ratio()` 第一版把「年化」Sharpe
+直接代入一個是為「單期（日）」Sharpe 設計的變異數公式，導致算出來的
+DSR 飽和在 1.0000（表面上「完美顯著」，實際上是單位不一致的計算
+錯誤）。單元測試（`tests/test_task6.py`）刻意設計了一個「n_trials
+越多、DSR 應該越低」的邏輯斷言，兩個案例都算出 1.0 才發現這個問題，
+修正成先把年化 Sharpe 換算回日 Sharpe 再代入公式後，重新真實跑一次
+（DSR 從失真的 1.0000 變成真實的 0.4190），確認測試通過後才寫進最終
+報告——過程記錄在 `strategy/significance.py` 的函式註解裡。
+
+**Task 6d 需要新增的 `quant_layer2.py` 參數**：`build_positions()`／
+`run_pipeline()` 新增 `fixed_weights: Optional[Dict[str,float]]` 參數
+（只在 `use_fixed_weights=True` 時有作用），可以覆蓋預設的
+`active_default` 固定權重——這是 attribution.py 算「單因子版」邊際
+貢獻需要的（例如只傳 `{"momentum": 1.0}`，只給 momentum 因子權重）。
+
+**驗收結果總表**：
+- 6 fold 中 ≥4 個正報酬：✅ 通過（4/6）
+- B 版 MDD 比 A 改善 ≥25%：✅ 通過（54.2%）
+- B 版 Sharpe ≥ A − 0.1：❌ 未通過（延續 Task 4 已知的風險/報酬取捨）
+- significance／attribution 報告完整產出：✅ 通過（含誠實的不顯著/
+  負面顯著結果，沒有調整方法去湊「顯著」的結論）
+
+**後果**：新增 `strategy/walk_forward.py`（重寫，改為呼叫 `factors/`
+模組與 `quant_layer2.build_rev_yoy()`，不再手刻一份會跟正式因子定義
+逐漸分歧的公式）、`strategy/ablation.py`、`strategy/significance.py`、
+`strategy/attribution.py`；`quant_layer2.py` 新增 `use_fixed_weights`／
+`fixed_weights` 參數；`tests/test_task6.py` 新增 14 項測試（合成資料，
+含 DSR bug 的迴歸測試）；pytest 全部 67/67 通過。
+
+---
+
+## 2026-08-22 — Task 5 相關澄清：資料範圍延伸、ML 版報酬下降原因
+
+**狀態：澄清記錄，不是待決定事項**
+
+**澄清一：margin_usage 因子失效跟資料範圍延伸無關**——曾經一度以為
+「margin_usage／inst_flow 在 Task 2、Task 5 都測不出訊號」可能代表
+應該進一步往前延伸資料範圍（更多歷史樣本＝更容易測出訊號）。已澄清
+這兩件事無關：Task 5 的因子穩定性分析用的是 2018-2026（9 個 walk-forward
+fold）「有機制標籤可用」的資料，margin_usage 連續 9 年排名墊底是訊號
+本身穩定地不存在，不是樣本數不夠。真正卡住 Task 3 資料範圍的是
+**三大法人（institutional_investors）資料的真實可得起點 2012-05-02**
+（見 `docs/DATA_AVAILABILITY.md`），不是融資資料（`margin_trading`
+的可得起點更早，2001-01-05，見 Task 1 細節）——這兩個資料集的限制
+是獨立的兩件事，融資資料本身並不卡在 2012-05-02 這個門檻上。
+
+**決定**：暫不進一步延伸資料範圍。理由：(1) 延伸資料範圍解決不了
+margin_usage/inst_flow 沒訊號的問題（訊號穩定性已經在現有樣本下驗證
+過，不是樣本不足造成的假陰性）；(2) 是否需要更長的樣本外驗證期，
+應該等 Task 6 的 Walk-Forward（6 fold，2020-2025）結果出爐後，看
+樣本外表現是否已經充分，再決定要不要進一步延伸——不要在還沒有
+walk-forward 證據之前就先假設「資料不夠多」。
+
+**澄清二：Task 5 端到端比較裡 ML 版總報酬下降、換手率上升的原因**——
+`docs/DECISIONS.md`「Task 5：ML 因子合成完成」那筆已經列出數字，這裡
+補充明確的原因拆解，避免之後誤讀成程式錯誤：
+1. **Walk-forward 暖機期效應**：ML 預測值只從 2018 年才開始有值
+   （2013-2017 是訓練資料暖機期，見 `strategy/ml_composite.py` 的
+   `MIN_TRAIN_DAYS` 判斷），2015-2017 這段期間 ML 版等於空手／低配置，
+   直接拉低「總報酬」這種累計數字，但不影響「年化報酬」對照的公平性
+   （年化報酬用幾何平均，天然對齊有效交易天數，且 ML 版年化報酬
+   6.8% 實際上略優於基準版 6.5%）。
+2. **每年重訓造成的因子組合邏輯逐年微調**：expanding-window walk-forward
+   每年 1 月重新訓練一次模型，模型學到的「因子重要性」與非線性組合
+   方式每年都會因為新增一年資料而微調（見
+   `reports/feature_importance_by_year.md` 的逐年 importance 表格，
+   數值確實逐年浮動），這會讓選股結果在年度之間比固定權重的線性版本
+   更容易變動，直接反映在換手率（330.2% vs 基準版 255.2%）與年度間
+   績效變異度上。**這是「模型持續適應最新資料」與「持倉穩定度」之間
+   已知的取捨（adaptability vs stability trade-off），不是程式錯誤**——
+   跟固定一套永遠不變的權重相比，願意逐年微調換來的是模型不會固守
+   過時的因子關係，代價是換手率與年度間波動變大。
+
+---
+
+## 2026-08-22 — Task 6 ablation D 語意決定：把 use_regime_weights 拆成兩個獨立開關
+
+**狀態：已決定並實作**
+
+**問題**：Task 4 的 `use_regime_weights` 一個布林開關同時控制兩件事：
+(1) 選股排名要不要用機制靜態因子權重（`REGIME_FACTOR_WEIGHTS`，Task 4a）
+取代動態 IC 加權；(2) 部位規模要不要用機制建議曝險比例縮放（Task 4b）。
+Task 6b 要做 ablation D（ML 選股＋機制曝險），這時候問題浮現：ablation D
+要的是「選股用 ML（`use_ml_composite`），曝險水位由機制決定」——但
+`use_regime_weights=True` 會同時把選股邏輯也切換成機制靜態權重，
+跟 `use_ml_composite` 要的「選股用 ML」直接衝突，兩個開關綁在一起
+沒辦法表達「機制只管曝險、不管選股」這個組合。
+
+**選項**：
+A. 維持 `use_regime_weights` 單一開關，ablation D 另外寫一條獨立的
+   程式路徑（例如在 `ablation.py` 裡繞過 `build_positions()`，自己
+   組裝「ML 分數 × 機制曝險」的部位）——不用動 `quant_layer2.py`，
+   但複製一份跟 `build_positions()` 幾乎一樣的再平衡/緩衝區/成本
+   邏輯，任何一邊改了容易漏改另一邊，是重複程式碼的風險
+B. 把 `use_regime_weights` 拆成兩個獨立開關：`use_regime_factor_weights`
+   （只管選股排名依據）與 `use_regime_exposure`（只管曝險水位），
+   讓 `build_positions()` 原生支援「ML 選股＋機制曝險」這個組合，
+   不用複製邏輯
+
+**選擇**：選項 B。
+
+**為什麼**：兩個開關管的其實是不同層次的決策——選股排名依據（用什麼
+分數幫股票排序）跟資金配置比例（曝險縮放）在概念上是正交的，任何一種
+排名方法（動態 IC／機制靜態權重／ML）理論上都可以搭配「要不要用機制
+曝險縮放」。拆開後 Task 6 需要的四個 ablation 版本都能用同一套
+`build_positions()` 表達，不用維護第二份幾乎重複的回測邏輯（`build_positions()`
+裡緩衝區、inertia 平滑、交易成本模擬這些邏輯很容易在複製時漏掉或
+不小心產生行為差異，這正是本專案一直避免的重複程式碼風險）。
+
+**實作內容**：
+- `strategy/quant_layer2.py`：`build_positions()`／`run_pipeline()` 的
+  `use_regime_weights` 參數拆成 `use_regime_factor_weights`（原 Task 4a
+  功能：機制靜態權重合成因子分數，跟 `use_ml_composite` 互斥）與
+  `use_regime_exposure`（原 Task 4b 功能：機制曝險縮放部位規模，
+  獨立於選股邏輯，可以搭配任何一種排名方法）
+- Ablation D 配置：`use_ml_composite=True` + `use_regime_factor_weights=False`
+  + `use_regime_exposure=True`（ML 決定選股排名，機制決定曝險水位，
+  兩者互不干擾）
+- `is_bull`（是否允許買入新股）跟 renormalize（要不要把權重重新正規化
+  回 1）的判斷依據都從 `use_regime_weights` 改成 `use_regime_exposure`
+  ——只要曝險縮放在運作，風險控制就交給連續的曝險比例，不再靠 binary
+  開關擋買進，避免雙重收緊風險，這個邏輯跟原本 Task 4b 的設計精神
+  一致，只是判斷依據換成更精確的開關
+- `tests/test_ml_composite.py` 新增 2 項測試：驗證 ablation D 組合
+  （ML＋機制曝險）不會丟例外且曝險縮放真的生效；驗證
+  `use_regime_exposure=True`＋`use_regime_factor_weights=False` 能重現
+  「機制只管曝險、不管選股」的獨立效果。原本測試互斥例外的那項改成
+  對 `use_regime_factor_weights` 斷言（語意不變，只是換了參數名稱）
+- pytest 53/53 全過（41 舊＋10 Task 5 新＋2 這次新增）
+
+---
+
 ## 2026-08-22 — Task 5：ML 因子合成完成，margin_usage 在非線性方法下依然沒有訊號
 
 **狀態：不是卡住待決定，是主動記錄 Task 5 的完整結果，供你之後評估**

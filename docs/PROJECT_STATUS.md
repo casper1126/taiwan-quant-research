@@ -4,10 +4,10 @@
 比對對象：`CLAUDE_CODE_TASKS.md`（Task 1-9 內容逐字轉錄自
 `CLAUDE_CODE_TASKS.md.pdf`，另外加了規則 9-11，見該檔案開頭說明）。
 
-**最後更新：2026-08-22（Task 1-5 完成後）**——本文件前半段（§0、環境注意
+**最後更新：2026-08-23（Task 1-6 完成後）**——本文件前半段（§0、環境注意
 事項、Task 1/2 細節、402 事故報告）是 2026-08-17～18 寫的，反映當時的
-狀態；Task 3、4、5 完成後的最新狀態記錄在下方「Task 1–9 完成度總表」與
-新增的 Task 3／Task 4／Task 5 細節小節裡。決策過程的完整記錄在
+狀態；Task 3、4、5、6 完成後的最新狀態記錄在下方「Task 1–9 完成度總表」與
+新增的 Task 3／Task 4／Task 5／Task 6 細節小節裡。決策過程的完整記錄在
 [docs/DECISIONS.md](DECISIONS.md)，這裡只總結結論。
 
 ## 執行紀錄
@@ -122,12 +122,12 @@ Task 1-9 的範圍外，維持獨立、不整合）。Task 3 的 `regime/` 模�
 | 3 | 機制偵測模組 | **✅ 完成**（`regime/` 6 個檔案全部建立；8 項驗收 6 項通過，2 項確認為系統誠實特性，非 bug） | 見下方「Task 3 細節」 |
 | 4 | 機制整合到策略 | **✅ 完成**（`REGIME_FACTOR_WEIGHTS`／曝險整合／`strategy/portfolio.py` 全部完成；3 項驗收全過；發現機制版績效遠低於基準版，已記錄非阻斷） | 見下方「Task 4 細節」 |
 | 5 | ML 因子合成 | **✅ 完成**（`strategy/ml_composite.py` 全部建立；9 個 walk-forward fold 全部訓練成功；SHAP／逐年 importance／因子穩定性分析三份報告全部真實產出） | 見下方「Task 5 細節」 |
-| 6 | 驗證框架 | **未開始 (0%)**，下一個要做的 Task，但有舊版可參考 | 規格要求的檔案/報告都不存在，見下方 |
+| 6 | 驗證框架 | **✅ 完成**（Walk-Forward／Ablation A-D／統計顯著性／績效歸因全部真實跑完；3/4 驗收項目通過，1 項延續 Task 4 已知取捨誠實未通過） | 見下方「Task 6 細節」 |
 | 7 | 研究誠信模組 | **未開始 (0%)**，優先度因資料延伸而提高 | `survivorship.py` / `decay_monitor.py` / `capacity.py` 均不存在；見下方「存活者偏誤」提醒 |
 | 8 | 自動化整合 | **部分完成，且目前壞掉** | 見下方（`daily_update.py` 有 SyntaxError） |
 | 9 | 文件與發布 | **未開始** | README 現況以 Discord bot 為敘事核心，非作品集規格 |
 
-**整體完成度：5/9 Task（約 56%）**
+**整體完成度：6/9 Task（約 67%）**
 
 ### Task 1 細節（資料補完）—— 最新狀態
 
@@ -396,14 +396,55 @@ stopping 觸發點）在 51~485 之間跳動，沒有固定卡在 500 的上限�
 額外要求的 `reports/factor_stability_analysis.md` 也產出 ✅。`tests/test_ml_composite.py`
 新增 10 項測試（合成資料），pytest 全部 51 項通過。
 
-### Task 6 細節（驗證框架）
+### Task 6 細節（驗證框架）—— ✅ 完成（2026-08-23）
 
-`strategy/walk_forward.py`（Layer 2 舊版）與 `strategy/walk_forward_l3.py`（Layer 3 anchored
-版）都存在，且 `reports/` 裡已有 `walk_forward_l3.json` / `walk_forward_l3.md` 的輸出，但：
-- 沒有依照 Task 6a 規格「訓練 [2015,y-1] → 測試 [y]，y=2020..2025 共 6 fold」重新產出
-  `reports/walk_forward_results.md/.json`
-- `strategy/ablation.py`、`strategy/significance.py`、`strategy/attribution.py` 都不存在
-- 對應的 `ablation_results.md`、`significance_report.md`、`attribution_report.md` 都沒有
+`strategy/walk_forward.py` 依 Task 6a 規格重寫（原本的舊版是任務書規格之外的獨立實作、
+用自己手刻的因子公式，跟 `factors/` 模組定義會逐漸分歧——這次重寫改成呼叫
+`factors/style.py` 與 `quant_layer2.build_rev_yoy()`，維持因子定義單一事實來源）；
+新增 `strategy/ablation.py`（6b）、`strategy/significance.py`（6c）、
+`strategy/attribution.py`（6d）。`strategy/walk_forward_l3.py`（Layer 3 anchored 版）
+維持獨立、不動，任務書範圍外。
+
+**6a Walk-Forward**（`reports/walk_forward_results.{md,json}`）：訓練
+[2015-01-01, y-1] → 測試 [y]，y=2020..2025 共 6 fold，權重只用訓練期資料算、凍結後
+套用到測試年。結果：2020 +2.2%／2021 +25.9%／2022 -13.3%／2023 +18.6%／2024 +7.2%／
+2025 -1.2%，**4/6 正報酬**。整體 OOS（逐日串接）年化 +5.7%／Sharpe 0.288／MDD -26.3%。
+
+**6b Ablation**（`reports/ablation_results.md`）：A 固定權重無機制／B 固定權重+機制曝險／
+C 動態權重+機制曝險／D ML+機制曝險，同條件對照（同回測期間/參數，B/C/D 共用同一次
+`regime_engine` 輸出）：
+
+| 版本 | 總報酬 | 年化報酬 | Sharpe | MDD |
+|---|---:|---:|---:|---:|
+| A | +68.7% | +5.1% | 0.301 | -24.2% |
+| B | +14.8% | +1.3% | -0.054 | -11.1% |
+| C | +17.2% | +1.5% | 0.011 | -10.8% |
+| D | +10.1% | +1.3% | -0.089 | -10.1% |
+
+B vs A：MDD 改善 54.2%（門檻 25% ✅），Sharpe -0.054 vs 門檻 0.201（❌ 未通過，延續 Task 4
+已記錄的機制曝險在史詩級多頭期間犧牲報酬換取低波動的取捨，同一個現象在 Task 6 用更嚴謹
+的同條件對照又驗證一次）。
+
+**6c 統計顯著性**（`reports/significance_report.md`）：Task 2 基準策略（年化 6.46%／
+Sharpe 0.393）—— Deflated Sharpe Ratio（n_trials=8，這個專案真正做過的 8 個策略變體）
+0.4190（未達 0.95 顯著門檻）；Sharpe 95% CI [-0.056, 1.132]（含 0，不顯著）；Bootstrap
+p-value（vs TAIEX buy-and-hold）0.0272（**顯著，但方向是負面的**——策略顯著跑輸大盤，
+年化落後約 7.4 個百分點，這段期間台股是史詩級多頭）。三項檢定裡唯一顯著的結果是
+「策略跑輸大盤」，這個發現需要在 README Limitations 如實揭露。
+
+**6d 績效歸因**（`reports/attribution_report.md`）：總報酬恆等式分解（`identity_check`
+斷言通過）。完整版（固定權重）淨總報酬 +68.7%：momentum 貢獻最大 +31.0%（權重 0.34），
+rev_yoy 最小 +6.5%（權重 0.18）；擇時貢獻 +27.7%；成本拖累 -8.3%；殘差 -10.0%。
+
+**過程中發現並修正一個 bug**：`significance.py` 的 `deflated_sharpe_ratio()` 第一版把
+年化 Sharpe 直接代入「單期」公式，DSR 飽和失真在 1.0000，被單元測試的邏輯斷言（n_trials
+越多 DSR 應該越低）抓到，修正單位轉換後重新真實跑出 0.4190，完整記錄在
+`docs/DECISIONS.md`（「Task 6」那筆）。
+
+**驗收結果**：6 fold ≥4 正報酬 ✅／B 版 MDD 改善 ≥25% ✅／B 版 Sharpe ≥ A−0.1 ❌（已知
+取捨）／significance＋attribution 報告完整產出 ✅。`tests/test_task6.py` 新增 14 項測試，
+pytest 全部 67/67 通過。`quant_layer2.py` 新增 `use_fixed_weights`／`fixed_weights` 參數
+（Task 6b/6d 需要的固定權重與單因子版模式）。
 
 ### Task 7 細節（研究誠信模組）
 
@@ -467,7 +508,7 @@ stopping 觸發點）在 51~485 之間跳動，沒有固定卡在 500 的上限�
 
 | 檔案 | 角色 |
 |---|---|
-| `quant_layer2.py` | 多因子回測引擎（任務書鎖定的目標檔案；因子邏輯模組化到 `factors/`，複合權重支援動態 IC 加權或 Task 4 的機制靜態權重，`inst_flow` 已移出複合） |
+| `quant_layer2.py` | 多因子回測引擎（任務書鎖定的目標檔案；因子邏輯模組化到 `factors/`，複合權重支援動態 IC 加權／Task 4 機制靜態權重／Task 5 ML 分數／Task 6 固定權重四種排名依據，`use_regime_factor_weights`／`use_regime_exposure` 兩個獨立開關（2026-08-22 從 `use_regime_weights` 拆分），`inst_flow` 已移出複合） |
 | `factors/base.py` | **新增（Task 2）**：`cross_zscore`、`winsorize` 共用工具 |
 | `factors/style.py` | **新增（Task 2）**：`momentum_52w`、`value_composite`、`low_vol_ivol` |
 | `factors/taiwan.py` | **新增（Task 2）**：`inst_flow`、`margin_usage`、`margin_squeeze_market`、`quality`（佔位）——`inst_flow`/`margin_usage` 仍計算，但不進 `quant_layer2.py` 的複合權重（見上方 Task 2 最終決定） |
@@ -480,8 +521,11 @@ stopping 觸發點）在 51~485 之間跳動，沒有固定卡在 500 的上限�
 | `pairs_module.py` | 配對交易策略 K（任務書未提及） |
 | `pairing_analyzer.py` | 策略搭配效果分析工具 |
 | `portfolio_combiner.py` | 多 sleeve 組合配置器 N2 |
-| `walk_forward.py` | Layer 2 專用 walk-forward 驗證（舊版，非 Task 6 規格） |
-| `walk_forward_l3.py` | Layer 3 專用 anchored walk-forward 驗證 |
+| `walk_forward.py` | **重寫（Task 6a）**：Layer 2 walk-forward OOS 驗證，訓練[2015,y-1]→測試[y] 共 6 fold，改呼叫 `factors/` 模組（不再手刻公式） |
+| `walk_forward_l3.py` | Layer 3 專用 anchored walk-forward 驗證（任務書未提及，獨立分支） |
+| `ablation.py` | **新增（Task 6b）**：A/B/C/D 四版本同條件對照 + 機制分段績效 |
+| `significance.py` | **新增（Task 6c）**：Deflated Sharpe Ratio／Lo(2002) 信賴區間／Bootstrap p-value |
+| `attribution.py` | **新增（Task 6d）**：總報酬恆等式分解（因子邊際貢獻+擇時貢獻-成本+殘差） |
 
 ### `regime/`（**新增，Task 3**，機制偵測模組，只被 `quant_layer2.py` 呼叫，不反向依賴它）
 
@@ -504,9 +548,10 @@ stopping 觸發點）在 51~485 之間跳動，沒有固定卡在 500 的上限�
 | `test_download_supplementary.py` | **新增（Task 1 402 事故修復）**：配額耗盡/休眠/恢復測試（5 項） |
 | `test_regime.py` | **新增（Task 3）**：`regime/` 模組單元測試，含 HMM 無 look-ahead 斷言（11 項） |
 | `test_portfolio.py` | **新增（Task 4）**：`strategy/portfolio.py` 單元測試（7 項） |
-| `test_ml_composite.py` | **新增（Task 5）**：`strategy/ml_composite.py` 單元測試，含 `quant_layer2.py` 的 `use_ml_composite` 整合測試（10 項） |
+| `test_ml_composite.py` | **新增（Task 5，2026-08-22 補充 2 項）**：`strategy/ml_composite.py` 單元測試 + `quant_layer2.py` 的 `use_ml_composite`／`use_regime_factor_weights`／`use_regime_exposure` 整合測試（12 項） |
+| `test_task6.py` | **新增（Task 6）**：`walk_forward.py`／`ablation.py`／`significance.py`／`attribution.py` 純邏輯函式測試，合成資料，含 DSR 單位換算 bug 的迴歸測試（14 項） |
 
-**pytest 現況：51/51 全過。**
+**pytest 現況：67/67 全過。**
 
 ### `automation/`
 
@@ -536,7 +581,10 @@ Task 4 機制版績效落差、Task 5 ML 因子合成結果 共 5 筆）、`DATA
 `turnover_decomposition.md`（Task 4 換手率分解報告）、`shap_summary.png`（Task 5 SHAP
 summary，最後一個 fold 的特徵貢獻分佈）、`feature_importance_by_year.md`（Task 5 逐年
 feature importance）、`factor_stability_analysis.md`（Task 5 因子穩定性分析＋訓練策略
-比較實驗）。
+比較實驗）、`walk_forward_results.{md,json}`（Task 6a walk-forward OOS 驗證）、
+`ablation_results.md`（Task 6b A/B/C/D 同條件對照＋機制分段績效）、
+`significance_report.md`（Task 6c 統計顯著性檢定）、`attribution_report.md`
+（Task 6d 績效歸因恆等式分解）。
 
 ### `.github/workflows/daily_quant.yml` 與 `github/workflows/daily_quant.yml`
 
@@ -679,31 +727,34 @@ margin_trading 階段新增 1866 檔（失敗 0，跳過 229 檔含真無資料�
 配額用盡 → 自動休眠 25 分鐘 → 整點自動恢復，全程無人工介入。最終數字見上方 Task 1 細節，
 三項驗收全部通過。
 
-## 4. 建議的執行起點（2026-08-22 更新：Task 1-5 已完成，這裡是給 Task 6 開始前的提醒）
+## 4. 建議的執行起點（2026-08-23 更新：Task 1-6 已完成，這裡是給 Task 7 開始前的提醒）
 
-- **Task 1-5 全部完成**，本節以下內容是歷史記錄（Task 1 剛開始時寫的），保留給未來回顧
+- **Task 1-6 全部完成**，本節以下內容是歷史記錄（Task 1 剛開始時寫的），保留給未來回顧
   時參考當時的判斷依據。
-- **下一步是 Task 6（驗證框架）**：`strategy/walk_forward.py`（訓練 [2015,y-1] → 測試 [y]，
-  y=2020..2025 共 6 fold）、`strategy/ablation.py`（A 固定權重無機制／B 固定權重+機制曝險／
-  C 動態權重+機制曝險／D ML+機制曝險 四版本對照——D 版會需要同時啟用 Task 4 的
-  `use_regime_weights` 與 Task 5 的 `use_ml_composite`，但這兩個參數目前互斥會丟
-  `ValueError`，動工前要先決定兩者結合的語意，見下方）、`strategy/significance.py`
-  （deflated Sharpe／信賴區間／bootstrap p-value）、`strategy/attribution.py`（報酬歸因）。
-- **Task 6 的 ablation D 需要先擴充 `quant_layer2.py` 的機制／ML 組合語意**：目前
-  `use_regime_weights`（機制靜態權重排名＋曝險縮放）與 `use_ml_composite`（ML 分數排名，
-  曝險固定 1.0）是互斥的，同時開啟會丟 `ValueError`（Task 5 完成時刻意這樣設計，見
-  `docs/DECISIONS.md`「Task 5」那筆）。做 ablation D 時要決定：用 ML 分數排名選股、
-  再乘上機制曝險比例？還是別的組合方式？這是 Task 6 開工前的第一個設計決定，不是
-  Task 5 遺留的 bug。
+- **下一步是 Task 7（研究誠信模組）**：`data_pipeline/survivorship.py`（存活者偏誤，保底
+  必做 `reports/survivorship_analysis.md`，文獻估計引 Shumway 1997）、
+  `regime/decay_monitor.py`（因子衰退監控，252 日滾動 IC，`reports/factor_decay_history.png`）、
+  `strategy/capacity.py`（ADV 5% 規則，`reports/capacity_analysis.md`）。
+- **Task 7（存活者偏誤）的優先度因為 Task 3 執行的資料延伸而提高**（回測曝險時間從 11 年
+  拉長到 14 年），這是任務書原本就排在後面、但因為這次專案的資料延伸決定而應該提前重視
+  的項目，建議 Task 7 開工時把這個列為第一個要做的子項目（7a）。
+- **Task 6c 統計顯著性檢定發現一個重要的誠實結果，需要在 Task 9 README 撰寫時如實揭露**：
+  Task 2 基準策略在 2015-2026 這段回測期間，逐日報酬「顯著地」跑輸 TAIEX 買進持有
+  （bootstrap p-value 0.0272，年化落後約 7.4 個百分點），這段期間台股經歷史詩級大多頭。
+  Deflated Sharpe Ratio（0.4190）與 Sharpe 95% 信賴區間（含 0）都顯示策略的風險調整後
+  優勢也**不具統計顯著性**。Task 9 撰寫 README 的 Limitations 章節時，不能只挑對策略
+  有利的指標（例如波動度更低、回撤更小）來寫，這個「絕對報酬跑輸大盤」的結果要並列
+  說明，這是本專案研究誠信原則的核心測試——不能因為結果不好看就選擇性引用。
+- **Task 4 發現的機制版績效落差**、**Task 5 的 ML 版好壞參半結果**、**Task 6b Ablation
+  的同條件對照**三者現在都有完整的真實數字可以互相對照（見上方 Task 4/5/6 細節），
+  一致指向同一個結論：機制曝險在這段史詩級多頭期間會系統性犧牲報酬換取低波動與低回撤，
+  是否要調整機制校準方式（Task 3 的健康分數/hysteresis 設計）或 ML 訓練策略（因子穩定性
+  分析報告裡「最近三年加權平均」備選方案），目前累積的證據已經足夠支持你做這個決定，
+  不需要更多實驗；如果決定要調整，建議在 Task 8（自動化整合，機制訊號會寫進每日通知）
+  之前定案，避免調整後還要重新驗證自動化流程。
 - **LINE_NOTIFY_TOKEN / NOTION_TOKEN / NOTION_DATABASE_ID 仍未設定**，Task 8 驗收前需要你
   另外申請並補進 `.env`，這不是我能代勞的部分（Task 8 通知功能設計成 token 不存在時自動
   降級成 dry-run，不會因此卡住其他 Task，但沒有這些 token 就無法驗收真實通知有沒有送達）。
-- **Task 7（存活者偏誤）的優先度因為 Task 3 執行的資料延伸而提高**（回測曝險時間從 11 年
-  拉長到 14 年），建議 Task 6/7 排序時把這個納入考量。
-- **Task 4 發現的機制版績效落差**（13.6% vs 92.1%）與 **Task 5 的 ML 版好壞參半結果**
-  （年化/Sharpe 略優、回撤/換手率更差，見上方 Task 5 細節）都值得在 Task 6 的 ablation
-  跑完、能同條件對照四個版本之後，一併重新評估要不要調整 Task 3 的機制校準方式或
-  Task 5 的訓練策略（例如因子穩定性分析報告裡「最近三年加權平均」那個備選方案）。
 
 ---
 

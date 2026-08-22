@@ -7,7 +7,9 @@ tests/test_ml_composite.py
   - compute_factor_rank_table()：五因子重要性排名（1=當年最重要）
   - _daily_ic()：逐日橫截面 Spearman IC 計算
   - quant_layer2.build_positions() 的 Task 5 整合：use_ml_composite=True
-    時真的用 ml_scores 排名選股，且跟 use_regime_weights 同時開啟會丟例外
+    時真的用 ml_scores 排名選股，且跟 use_regime_factor_weights 同時開啟
+    會丟例外；use_regime_exposure（Task 6 拆分出來的獨立曝險開關）則
+    可以跟 use_ml_composite 自由搭配（Task 6 ablation D 的組合）
 """
 
 import sys
@@ -203,10 +205,53 @@ def test_build_positions_ml_composite_requires_scores():
         quant_layer2.build_positions(factors, use_ml_composite=True, ml_scores=None)
 
 
-def test_build_positions_ml_composite_and_regime_weights_mutually_exclusive():
+def test_build_positions_ml_composite_and_regime_factor_weights_mutually_exclusive():
+    """use_ml_composite 與 use_regime_factor_weights 都是「用什麼分數排名」，同時開啟該丟例外。"""
     factors, idx, cols = _synthetic_factors_for_positions(n_days=100, n_stocks=20)
     ml_scores = pd.DataFrame(1.0, index=idx, columns=cols)
     with pytest.raises(ValueError):
         quant_layer2.build_positions(
-            factors, use_ml_composite=True, ml_scores=ml_scores, use_regime_weights=True,
+            factors, use_ml_composite=True, ml_scores=ml_scores,
+            use_regime_factor_weights=True,
         )
+
+
+def test_build_positions_ablation_d_ml_plus_regime_exposure_allowed():
+    """Task 6 ablation D：use_ml_composite=True + use_regime_exposure=True（曝險獨立於選股，
+    不該互斥），且曝險縮放應該真的讓總部位規模縮小（BEAR 曝險 0.1 遠低於全倉）。"""
+    factors, idx, cols = _synthetic_factors_for_positions(n_days=300, n_stocks=30)
+    # 分數要有區別才能真的排出名次（全部同分會 tie，rank() 平均後沒有股票
+    # 落在 top_n 門檻內，見 apply_buffer 的排名邏輯）。
+    rank_scores = {c: (len(cols) - i) for i, c in enumerate(cols)}
+    ml_scores = pd.DataFrame([rank_scores] * len(idx), index=idx, columns=cols).astype(float)
+
+    regime_df = pd.DataFrame({
+        "regime": "BEAR", "exposure": 0.1,
+    }, index=idx)
+
+    # 不應該丟例外（跟 use_regime_factor_weights 的互斥檢查不同）
+    positions = quant_layer2.build_positions(
+        factors, top_n=5, rebal_freq=60, buffer_multiplier=1.5,
+        ml_scores=ml_scores, use_ml_composite=True,
+        regime_df=regime_df, use_regime_exposure=True,
+    )
+
+    # BEAR 曝險 0.1：任何一天的總部位比例都應該遠低於「正常全倉等權」(top_n * eq_weight ≈ 1.0)
+    last_pos = positions.iloc[-1]
+    assert last_pos.sum() <= 0.1 + 1e-6
+    assert last_pos.sum() > 0  # 曝險不是 0，代表真的有部位、不是意外清空
+
+
+def test_build_positions_regime_exposure_independent_of_factor_weights():
+    """use_regime_exposure=True 但 use_regime_factor_weights=False：應該用預設動態 IC 排名，
+    只有曝險水位受機制影響——這是原本 Task 4（use_regime_weights=True）的行為，拆開後
+    用兩個旗標一起打開應該重現同樣的效果。"""
+    factors, idx, cols = _synthetic_factors_for_positions(n_days=300, n_stocks=30)
+    regime_df = pd.DataFrame({"regime": "WARNING", "exposure": 0.4}, index=idx)
+
+    positions = quant_layer2.build_positions(
+        factors, top_n=5, rebal_freq=60, buffer_multiplier=1.5,
+        regime_df=regime_df, use_regime_exposure=True, use_regime_factor_weights=False,
+    )
+    last_pos = positions.iloc[-1]
+    assert last_pos.sum() <= 0.4 + 1e-6
