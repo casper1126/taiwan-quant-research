@@ -6,6 +6,86 @@
 
 ---
 
+## 2026-08-22 — Task 5：ML 因子合成完成，margin_usage 在非線性方法下依然沒有訊號
+
+**狀態：不是卡住待決定，是主動記錄 Task 5 的完整結果，供你之後評估**
+
+**背景**：Task 2 用線性 IC 排查後把 `inst_flow`／`margin_usage` 移出主策略
+複合（見上方「inst_flow／margin_usage IC 偏低」那筆），移交 Task 5 用
+非線性方法（LightGBM）重新評估。Task 5 建立 `strategy/ml_composite.py`：
+特徵＝五個核心因子（momentum/value/rev_yoy/low_vol/margin_usage，
+inst_flow 延續 Task 2 的決定不重新加回來）＋機制 one-hot（BULL/NEUTRAL/
+WARNING/BEAR）＋大盤波動分位，標籤＝個股未來 20 日報酬橫截面分位數，
+LightGBM 迴歸（n_estimators 500／max_depth 5／learning_rate 0.01／
+early stopping 50），walk-forward 每年 1 月 1 日重訓一次，訓練資料是
+該年以前的「全部」歷史，且用全市場所有股票（不限流動性前 300、不限
+最終選中的 30 檔）——刻意跟 Task 2 的檢驗方法（流動性前 300 檔＋線性
+排名 IC）完全不同，才是真正獨立的第二次檢驗。
+
+**結果（真實訓練，9 個 walk-forward fold，2018-2026，訓練樣本 19.7 萬～
+59.2 萬筆不等）**：
+
+逐年 feature importance（`reports/feature_importance_by_year.md`）與
+因子穩定性分析（`reports/factor_stability_analysis.md`）顯示：
+- **momentum、low_vol 持續是最重要的兩個因子**（9 年中 low_vol 有 5 年
+  排名第一，momentum 排名穩定在 1-3 之間，排名標準差分別是 0.73、0.60）
+- **margin_usage 連續 9 年都是 5 個因子裡重要性最低**（排名標準差 = 0，
+  代表這不是「有時候有用有時候沒用」的雜訊型因子，而是穩定地不重要）——
+  跟 Task 2 線性 IC 排查的結論一致（IC -0.0039，接近全部因子裡最弱），
+  這次用完全不同的方法（非線性模型＋全市場樣本）重新驗證，結論相同：
+  **margin_usage 不是「線性方法測不出來的隱藏訊號」，是真的沒有訊號**。
+- rev_yoy 排名標準差最高（0.93，5 個因子裡最不穩定），某些年重要性
+  接近 momentum，某些年接近 margin_usage，看起來比較看市況。
+- value 排名相對穩定但重要性長期偏低（多數年份排名第 4）。
+
+**SHAP summary**（`reports/shap_summary.png`，用最後一個 fold［2026 年
+測試集］抽樣 3000 筆畫出）與逐年 gain-based importance 兩者結論一致，
+互相印證不是單一方法的偏差。
+
+**端到端回測比較**（2015-01-05～2026-04-17，ML 版的預測分數只從
+2018 年才開始有值，2015-2017 是 walk-forward 暖機期，這段期間 ML 版
+等於空手／低配置——這不是公平的逐年對照，但可以看出整體可用性）：
+
+| 指標 | 基準版（Task 2，動態 IC 加權） | ML 版（Task 5） |
+|---|---|---|
+| 總報酬 | 92.1% | 64.3%（含 2015-17 空手期的拖累） |
+| 年化報酬 | 6.5% | 6.8% |
+| Sharpe | 0.39 | 0.44 |
+| 最大回撤 | -24.9% | -34.0% |
+| 年化換手率 | 255.2% | 330.2% |
+
+年化報酬與 Sharpe 都比基準版略好，但總報酬較低（主要是 2015-2017
+沒有 ML 預測值可用，等於錯過那三年的報酬機會，拉低總報酬——用年化
+數字對照比較公平）、回撤更大、換手率也更高。這不是「ML 版明顯更好」
+或「明顯更差」的結果，是好壞參半，**不建議現在就把 `use_ml_composite`
+設成預設值**，維持 Task 2 線性版為預設（`use_ml_composite: bool = False`），
+ML 版本作為可選路徑保留，供 Task 6 的 ablation（D：ML＋機制曝險）
+與之後的策略選擇參考。
+
+**額外要求：訓練策略比較（只用最近一年 vs 最近三年加權平均）**——
+簡化版 walk-forward（2023-2026 共 4 年，n_estimators 縮小到 150 控制
+運算時間，兩種策略同一設定公平比較，用逐日橫截面 IC 當指標）：
+最近三年加權平均（0.5/0.3/0.2）平均 IC 較高（0.0629 vs 0.0532），但
+年度間標準差沒有比較小（0.0247 vs 0.0220）——是報酬與穩定性的取捨，
+不是單方面完勝，這個結果只放進 `reports/factor_stability_analysis.md`
+供之後參考，**不會現在就拿來改主模型的訓練方式**（主模型維持任務書
+規格的 expanding window／全部歷史）。
+
+**後果**：
+- 新增 `strategy/ml_composite.py`；`strategy/quant_layer2.py` 的
+  `build_positions()`／`run_pipeline()` 新增 `ml_scores`／
+  `use_ml_composite` 參數（預設 `False`，跟 `use_regime_weights`
+  互斥，同時開啟會丟 `ValueError`——兩者結合的明確語意留給 Task 6
+  的 ablation D 再定義，不在 Task 5 範圍內）
+- `reports/shap_summary.png`、`reports/feature_importance_by_year.md`、
+  `reports/factor_stability_analysis.md` 三份報告全部是真實訓練結果，
+  無估計值
+- `tests/test_ml_composite.py` 新增 10 項測試（合成資料），pytest
+  全部 51 項通過（41 舊＋10 新）
+- `requirements1.txt` 補上 `shap>=0.44.0`
+
+---
+
 ## 2026-08-22 — Task 4：機制動態版績效遠低於基準版，需要你知道這件事
 
 **狀態：不是卡住待決定，是主動記錄一個重要發現，供你評估**

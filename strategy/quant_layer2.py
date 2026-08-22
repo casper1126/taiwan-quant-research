@@ -439,7 +439,9 @@ def build_positions(factors: dict,
                     max_pct_dv: Optional[float] = None,
                     regime_df: Optional[pd.DataFrame] = None,
                     use_regime_weights: bool = False,
-                    weighting: Optional[str] = None) -> pd.DataFrame:
+                    weighting: Optional[str] = None,
+                    ml_scores: Optional[pd.DataFrame] = None,
+                    use_ml_composite: bool = False) -> pd.DataFrame:
     """
     根據因子決定每天的持倉比例矩陣。
 
@@ -482,7 +484,26 @@ def build_positions(factors: dict,
     weighting：Task 4c 規格的字串介面（'equal'|'risk_parity'），如果有給
     值就覆蓋 use_risk_parity（等同 weighting=='risk_parity'）；沒給值就
     照舊看 use_risk_parity。兩個參數並存是為了不破壞既有呼叫端。
+
+    ── Task 5：ML 因子合成（ml_scores / use_ml_composite）──────
+    ml_scores 是 strategy/ml_composite.py 的 walk_forward_ml_composite()
+    算好的 (date x stock_id) LightGBM 預測分數矩陣，跟 regime_df 一樣由
+    呼叫端先算好再傳進來（quant_layer2.py 不 import ml_composite.py，
+    維持單向依賴：ml_composite.py 可以 import quant_layer2.py，反過來
+    不行）。use_ml_composite=True 時，每個再平衡日直接用 ml_scores 當天
+    的值排名選股，取代動態 IC 加權或機制靜態權重合成的複合分數；大盤
+    擇時（is_bull 二元開關）維持原本的邏輯不變——Task 5 只換「用什麼
+    分數排名」，不改變風控結構。跟 use_regime_weights 互斥（同時給
+    True 會丟例外，避免「兩種排名依據都要」這種未定義行為）。
     """
+    if use_ml_composite and use_regime_weights:
+        raise ValueError("use_ml_composite 與 use_regime_weights 不能同時為 True："
+                         "兩者都是決定「用什麼分數排名選股」的機制，同時開啟語意不明確。"
+                         "Task 6 的 ablation D（ML + 機制曝險）要結合兩者時，"
+                         "屆時再擴充明確的組合語意，不在 Task 5 範圍內。")
+    if use_ml_composite and ml_scores is None:
+        raise ValueError("use_ml_composite=True 但沒有提供 ml_scores")
+
     if weighting is not None:
         if weighting not in ("equal", "risk_parity"):
             raise ValueError(f"weighting 必須是 'equal' 或 'risk_parity'，收到：{weighting!r}")
@@ -653,6 +674,16 @@ def build_positions(factors: dict,
             is_bull = True
             scores_today = _regime_scores_today(today)
             _, exposure_today = _regime_state_and_exposure(regime_df, today)
+        elif use_ml_composite:
+            # Task 5：排名依據換成 ml_scores（LightGBM 預測分數），大盤
+            # 擇時、曝險邏輯維持跟動態 IC 加權一樣（is_bull 二元開關，
+            # exposure 固定 1.0），只有「用什麼分數排名」不一樣。
+            is_bull = timing_stepped.loc[today] >= 0.5
+            if today in ml_scores.index:
+                scores_today = ml_scores.reindex(columns=cols).loc[today].where(valid.loc[today], np.nan)
+            else:
+                scores_today = pd.Series(np.nan, index=cols)
+            exposure_today = 1.0
         else:
             is_bull = timing_stepped.loc[today] >= 0.5
             scores_today = masked_composite.loc[today]
@@ -918,7 +949,9 @@ def run_pipeline(top_n: Optional[int] = None,
                  save_equity_path: Optional[str] = None,
                  regime_df: Optional[pd.DataFrame] = None,
                  use_regime_weights: Optional[bool] = None,
-                 weighting: Optional[str] = None) -> Tuple[dict, pd.Series, pd.DataFrame]:
+                 weighting: Optional[str] = None,
+                 ml_scores: Optional[pd.DataFrame] = None,
+                 use_ml_composite: Optional[bool] = None) -> Tuple[dict, pd.Series, pd.DataFrame]:
     """
     Run the full pipeline with optional parameter overrides.
 
@@ -927,6 +960,10 @@ def run_pipeline(top_n: Optional[int] = None,
     run_regime_engine() 取得（quant_layer2.py 本身不 import regime/，
     維持 Task 3-4 一開始定案的單向依賴：regime/ 不依賴 quant_layer2.py，
     但 quant_layer2.py 可以被動接受它的輸出）。
+
+    ml_scores/use_ml_composite：Task 5 ML 因子合成，見 build_positions() 的
+    docstring。ml_scores 由呼叫端先跑 strategy/ml_composite.py 的
+    walk_forward_ml_composite() 取得，同樣是被動接受，不反向 import。
 
     Returns: (stats_dict, equity_series, positions_df)
     """
@@ -941,6 +978,7 @@ def run_pipeline(top_n: Optional[int] = None,
     tax = TAX if tax is None else tax
     slippage = SLIPPAGE if slippage is None else slippage
     use_regime_weights = False if use_regime_weights is None else use_regime_weights
+    use_ml_composite = False if use_ml_composite is None else use_ml_composite
 
     # Step 1：載入資料
     data = load_matrices(DB_PATH, START_DATE, END_DATE)
@@ -968,6 +1006,8 @@ def run_pipeline(top_n: Optional[int] = None,
         regime_df=regime_df,
         use_regime_weights=use_regime_weights,
         weighting=weighting,
+        ml_scores=ml_scores,
+        use_ml_composite=use_ml_composite,
     )
 
     # Step 5：回測

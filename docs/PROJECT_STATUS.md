@@ -4,10 +4,10 @@
 比對對象：`CLAUDE_CODE_TASKS.md`（Task 1-9 內容逐字轉錄自
 `CLAUDE_CODE_TASKS.md.pdf`，另外加了規則 9-11，見該檔案開頭說明）。
 
-**最後更新：2026-08-22（Task 1-4 完成後）**——本文件前半段（§0、環境注意
+**最後更新：2026-08-22（Task 1-5 完成後）**——本文件前半段（§0、環境注意
 事項、Task 1/2 細節、402 事故報告）是 2026-08-17～18 寫的，反映當時的
-狀態；Task 3、4 完成後的最新狀態記錄在下方「Task 1–9 完成度總表」與
-新增的 Task 3／Task 4 細節小節裡。決策過程的完整記錄在
+狀態；Task 3、4、5 完成後的最新狀態記錄在下方「Task 1–9 完成度總表」與
+新增的 Task 3／Task 4／Task 5 細節小節裡。決策過程的完整記錄在
 [docs/DECISIONS.md](DECISIONS.md)，這裡只總結結論。
 
 ## 執行紀錄
@@ -121,13 +121,13 @@ Task 1-9 的範圍外，維持獨立、不整合）。Task 3 的 `regime/` 模�
 | 2 | 因子庫模組化重構 | **✅ 完成**（程式碼/測試/無回歸全部完成；inst_flow、margin_usage 因子 IC 排查後確認無線性預測力，已正式移出主策略複合，見「決定 C」，不是待決事項） | 見下方細節 |
 | 3 | 機制偵測模組 | **✅ 完成**（`regime/` 6 個檔案全部建立；8 項驗收 6 項通過，2 項確認為系統誠實特性，非 bug） | 見下方「Task 3 細節」 |
 | 4 | 機制整合到策略 | **✅ 完成**（`REGIME_FACTOR_WEIGHTS`／曝險整合／`strategy/portfolio.py` 全部完成；3 項驗收全過；發現機制版績效遠低於基準版，已記錄非阻斷） | 見下方「Task 4 細節」 |
-| 5 | ML 因子合成 | **未開始 (0%)**，下一個要做的 Task | `strategy/ml_composite.py` 不存在；`quant_pure_ml.py` 精神類似但規格不同 |
-| 6 | 驗證框架 | **未開始 (0%)**，但有舊版可參考 | 規格要求的檔案/報告都不存在，見下方 |
+| 5 | ML 因子合成 | **✅ 完成**（`strategy/ml_composite.py` 全部建立；9 個 walk-forward fold 全部訓練成功；SHAP／逐年 importance／因子穩定性分析三份報告全部真實產出） | 見下方「Task 5 細節」 |
+| 6 | 驗證框架 | **未開始 (0%)**，下一個要做的 Task，但有舊版可參考 | 規格要求的檔案/報告都不存在，見下方 |
 | 7 | 研究誠信模組 | **未開始 (0%)**，優先度因資料延伸而提高 | `survivorship.py` / `decay_monitor.py` / `capacity.py` 均不存在；見下方「存活者偏誤」提醒 |
 | 8 | 自動化整合 | **部分完成，且目前壞掉** | 見下方（`daily_update.py` 有 SyntaxError） |
 | 9 | 文件與發布 | **未開始** | README 現況以 Discord bot 為敘事核心，非作品集規格 |
 
-**整體完成度：4/9 Task（約 44%）**
+**整體完成度：5/9 Task（約 56%）**
 
 ### Task 1 細節（資料補完）—— 最新狀態
 
@@ -330,11 +330,71 @@ Limitations 需要雙重警語（見 `docs/DATA_AVAILABILITY.md` 第 4 節）。
 （還沒有未來 20 日報酬可以驗證）永遠拿不到 `crash_prob`，已修正成「訓練/AUC 評估用標籤，
 預測不需要標籤」分開處理，讓即時/最新資料也能正常產出預測值，這對 Task 8 的每日自動化很重要。
 
-### Task 5 細節（ML 因子合成）
+### Task 5 細節（ML 因子合成）—— ✅ 完成（2026-08-22）
 
-`strategy/ml_composite.py` 不存在。但 `strategy/quant_pure_ml.py`（M1：完全 ML-driven 策略）
-已經有 LightGBM 相關邏輯，設計哲學上與 Task 5 有重疊（都是拿 ML 做因子/報酬預測），但欄位、
-walk-forward 訓練切法、SHAP 輸出都不符合 Task 5 的規格。值得回收利用，但不能直接算完成。
+`strategy/ml_composite.py` 全部建立。跟 `strategy/quant_pure_ml.py`（M1，任務書未提及的
+獨立研究分支）刻意分開，沒有回收共用程式碼：M1 的特徵集（30+ 個）、訓練窗口（rolling
+4 年、90 天 refit）、投組建構方式都不符合 Task 5 的規格（expanding window／每年重訓／
+特定的 5 因子+機制+波動分位特徵集），硬套用共用反而增加耦合風險。
+
+**特徵**（10 欄，見 `strategy/ml_composite.py` 的 `ALL_FEATURES`）：
+- 五個核心因子（`FACTOR_FEATURES`）：momentum／value／rev_yoy／low_vol／margin_usage——
+  跟任務書「5 因子」對照：任務書原始規格的 5 因子是 momentum/value/rev_yoy/low_vol/
+  inst_flow，Task 2 已經把 inst_flow 移出（見上方決定），這裡延續同一個決定不重新加回來，
+  改用「4 個核心因子 + margin_usage」湊成規格說的「5 因子 + margin_usage」，跟因子穩定性
+  分析報告要求的「五個因子（含 margin_usage）」對得上
+- 機制 one-hot（4 欄）：BULL/NEUTRAL/WARNING/BEAR，來自 `regime/regime_engine.py`；
+  機制尚未暖機完成的早期日期全部填 0（代表「當下沒有機制資訊」，不是猜一個假狀態）
+- 大盤波動分位（1 欄）：重用 `regime/indicators.py` 的 `realized_vol_percentile`，
+  跟健康分數用的是同一個指標，不重算第二個不一致的版本
+
+**訓練方式**：LightGBM 迴歸（n_estimators 500／max_depth 5／learning_rate 0.01／
+early stopping 50），walk-forward 每年 1/1 重訓一次，訓練資料是該年以前的「全部」歷史
+（expanding window），且用全市場所有股票（不限流動性前 300、不限最終選中的 30 檔）——
+刻意跟 Task 2 的線性 IC 排查方法完全不同（不同樣本範圍＋不同模型類別），是真正獨立的
+第二次檢驗，不是換個名字重測一次。訓練樣本抽樣頻率：全市場每 5 個交易日取一天（計算量
+考量，明確記錄在模組說明裡；預測仍逐日進行，不受影響）。
+
+**真實跑出的結果（9 個 walk-forward fold，2018-2026，2013-2017 因暖機不足自動跳過）**：
+訓練樣本數從 2018 年的 19.7 萬筆成長到 2026 年的 59.2 萬筆，`best_iteration`（early
+stopping 觸發點）在 51~485 之間跳動，沒有固定卡在 500 的上限（代表 early stopping
+真的有在運作，不是擺設）。
+
+**因子穩定性分析結論**（`reports/factor_stability_analysis.md`）：
+- momentum、low_vol 持續是最重要的兩個因子（low_vol 9 年中 5 年排名第一）
+- **margin_usage 連續 9 年都排名最後（排名標準差 = 0）**——跟 Task 2 線性 IC 排查的
+  結論一致（IC -0.0039），這次換了完全不同的方法（非線性模型＋全市場樣本）重新驗證，
+  結論相同：margin_usage 不是「線性方法測不出來的隱藏訊號」，是真的沒有訊號
+- rev_yoy 排名標準差最高（0.93），比較看市況，不穩定
+- 額外實驗（只用最近一年 vs 最近三年加權平均）：最近三年加權平均平均 IC 較高
+  （0.0629 vs 0.0532）但年度間標準差沒有比較小，是取捨不是完勝，結果只供之後參考，
+  不會現在就改動主模型的 expanding-window 訓練方式
+
+**端到端回測比較**（誠實列出：不是完全公平的逐年對照，因為 ML 版的預測值只從 2018 年
+才開始有值，2015-2017 是 walk-forward 暖機期，那三年 ML 版等於空手／低配置）：
+
+| 指標 | 基準版（Task 2） | ML 版（Task 5） |
+|---|---|---|
+| 總報酬 | 92.1% | 64.3%（含 2015-17 空手期拖累） |
+| 年化報酬 | 6.5% | 6.8% |
+| Sharpe | 0.39 | 0.44 |
+| 最大回撤 | -24.9% | -34.0% |
+| 年化換手率 | 255.2% | 330.2% |
+
+年化報酬與 Sharpe 略優於基準版，但回撤更大、換手率更高，總報酬較低（主因是暖機期空手，
+用年化數字比較更公平）——好壞參半，不建議現在就把 `use_ml_composite` 設成預設值，
+維持 Task 2 線性版為預設（`use_ml_composite: bool = False`），ML 版本保留作為可選路徑，
+供 Task 6 的 ablation（D：ML＋機制曝險）與之後的策略選擇參考。
+
+**`quant_layer2.py` 整合**：`build_positions()`／`run_pipeline()` 新增 `ml_scores`／
+`use_ml_composite` 參數，跟 `use_regime_weights` 互斥（同時開啟丟 `ValueError`——兩者
+結合的明確語意留給 Task 6 的 ablation D 再定義）。
+
+**驗收結果**：ML 版跑通 ✅（不影響現有線性版本，`use_ml_composite` 預設 `False`）；
+`reports/shap_summary.png` 產出 ✅（1200×825 PNG，用最後一個 fold［2026 年測試集］
+抽樣 3000 筆畫出）；`reports/feature_importance_by_year.md` 產出 ✅（含每年比較）；
+額外要求的 `reports/factor_stability_analysis.md` 也產出 ✅。`tests/test_ml_composite.py`
+新增 10 項測試（合成資料），pytest 全部 51 項通過。
 
 ### Task 6 細節（驗證框架）
 
@@ -412,6 +472,7 @@ walk-forward 訓練切法、SHAP 輸出都不符合 Task 5 的規格。值得回
 | `factors/style.py` | **新增（Task 2）**：`momentum_52w`、`value_composite`、`low_vol_ivol` |
 | `factors/taiwan.py` | **新增（Task 2）**：`inst_flow`、`margin_usage`、`margin_squeeze_market`、`quality`（佔位）——`inst_flow`/`margin_usage` 仍計算，但不進 `quant_layer2.py` 的複合權重（見上方 Task 2 最終決定） |
 | `portfolio.py` | **新增（Task 4c）**：`equal_weight`／`risk_parity_weight`／`apply_buffer`／`decompose_turnover`／`write_turnover_report`，`build_positions()` 呼叫這裡的邏輯 |
+| `ml_composite.py` | **新增（Task 5）**：LightGBM 迴歸版因子合成，walk-forward 每年重訓，`quant_layer2.py` 用 `ml_scores`/`use_ml_composite` 參數接受它的輸出 |
 | `quant_layer3.py` | Layer 3 重新設計版（價值+品質因子+風險平價，任務書未提及） |
 | `quant_pure_ml.py` | 純 ML-driven 策略 M1（任務書未提及） |
 | `cta_module.py` | CTA 趨勢追蹤策略 I（任務書未提及） |
@@ -443,8 +504,9 @@ walk-forward 訓練切法、SHAP 輸出都不符合 Task 5 的規格。值得回
 | `test_download_supplementary.py` | **新增（Task 1 402 事故修復）**：配額耗盡/休眠/恢復測試（5 項） |
 | `test_regime.py` | **新增（Task 3）**：`regime/` 模組單元測試，含 HMM 無 look-ahead 斷言（11 項） |
 | `test_portfolio.py` | **新增（Task 4）**：`strategy/portfolio.py` 單元測試（7 項） |
+| `test_ml_composite.py` | **新增（Task 5）**：`strategy/ml_composite.py` 單元測試，含 `quant_layer2.py` 的 `use_ml_composite` 整合測試（10 項） |
 
-**pytest 現況：41/41 全過。**
+**pytest 現況：51/51 全過。**
 
 ### `automation/`
 
@@ -465,13 +527,16 @@ walk-forward 訓練切法、SHAP 輸出都不符合 Task 5 的規格。值得回
 
 **新增**：`DECISIONS.md`（規則 11 決定紀錄，每次卡在需要你決定的地方都記一筆：問題/選項/
 後果/最後選擇/為什麼——目前已有 inst_flow IC 偏低、402 bug、Task 3 機制偵測驗收、
-Task 4 機制版績效落差 共 4 筆）、`DATA_AVAILABILITY.md`（FinMind 各資料集真實最早可得
-日期偵查，2012-05-02 資料延伸的完整評估與執行記錄）。
+Task 4 機制版績效落差、Task 5 ML 因子合成結果 共 5 筆）、`DATA_AVAILABILITY.md`
+（FinMind 各資料集真實最早可得日期偵查，2012-05-02 資料延伸的完整評估與執行記錄）。
 
 **新增（reports/）**：`factor_negative_findings.md`（inst_flow/margin_usage 負面研究
 發現正式報告）、`health_score_breadth_divergence.md`（BULL 狀態全期罕見的根因分析）、
 `regime_history.png`（Task 3 機制歷史圖）、`ml_alert_auc.json`（ML 崩盤預警各年 AUC）、
-`turnover_decomposition.md`（Task 4 換手率分解報告）。
+`turnover_decomposition.md`（Task 4 換手率分解報告）、`shap_summary.png`（Task 5 SHAP
+summary，最後一個 fold 的特徵貢獻分佈）、`feature_importance_by_year.md`（Task 5 逐年
+feature importance）、`factor_stability_analysis.md`（Task 5 因子穩定性分析＋訓練策略
+比較實驗）。
 
 ### `.github/workflows/daily_quant.yml` 與 `github/workflows/daily_quant.yml`
 
@@ -492,11 +557,11 @@ Task 4 機制版績效落差 共 4 筆）、`DATA_AVAILABILITY.md`（FinMind 各
    第 493 行的 `return`（若修正後）之後永遠不會執行，屬於明確的死碼，應清理或改成真正的
    opt-in 分支而不是留著。
 
-4. ~~**requirements1.txt 缺依賴**~~ **部分修復**——`matplotlib`、`pytest` 已補進
-   `requirements1.txt`（Task 2 期間發現這個問題：venv 被整個重建後，這兩個套件連同其他
-   非 `requirements1.txt` 套件全部消失，見上方「環境注意事項」第三輪）。仍未列（照原計畫
-   留到 Task 8 才補）：`hmmlearn`、`shap`。`bot.py` 用到的 `discord.py` 也還沒補回去，
-   因為 `bot.py` 目前停用中，見 `_disabled/discord/README_RESTORE.md`。
+4. ~~**requirements1.txt 缺依賴**~~ **已修復**——`matplotlib`、`pytest` 於 Task 2 期間補進
+   （venv 被整個重建後，這兩個套件連同其他非 `requirements1.txt` 套件全部消失，見上方
+   「環境注意事項」第三輪）；`hmmlearn` 於 Task 3 開工前補進；`shap` 於 Task 5 補進。
+   `bot.py` 用到的 `discord.py` 還沒補回去，因為 `bot.py` 目前停用中，
+   見 `_disabled/discord/README_RESTORE.md`（這個不影響 Task 1-9 的範圍，維持現狀）。
 
 5. **`.env` 實際變數與兩份任務文件的假設不符** — 任務文件都寫「`.env` 已存在
    `FINMIND_TOKEN / LINE_NOTIFY_TOKEN / NOTION_TOKEN / NOTION_DATABASE_ID`」，但實際 `.env`
@@ -614,21 +679,31 @@ margin_trading 階段新增 1866 檔（失敗 0，跳過 229 檔含真無資料�
 配額用盡 → 自動休眠 25 分鐘 → 整點自動恢復，全程無人工介入。最終數字見上方 Task 1 細節，
 三項驗收全部通過。
 
-## 4. 建議的執行起點（2026-08-22 更新：Task 1-4 已完成，這裡是給 Task 5 開始前的提醒）
+## 4. 建議的執行起點（2026-08-22 更新：Task 1-5 已完成，這裡是給 Task 6 開始前的提醒）
 
-- **Task 1-4 全部完成**，本節以下內容是歷史記錄（Task 1 剛開始時寫的），保留給未來回顧
+- **Task 1-5 全部完成**，本節以下內容是歷史記錄（Task 1 剛開始時寫的），保留給未來回顧
   時參考當時的判斷依據。
-- **下一步是 Task 5（ML 因子合成）**：`strategy/ml_composite.py`，特徵含 5 因子 +
-  `margin_usage` + 機制 one-hot + 大盤波動分位，這是 `inst_flow`／`margin_usage` 兩個
-  Task 2 判定「線性方法下無訊號」的因子，移交非線性方法重新評估的正式落點——動工前
-  建議重讀 `reports/factor_negative_findings.md` 了解這兩個因子的背景。
+- **下一步是 Task 6（驗證框架）**：`strategy/walk_forward.py`（訓練 [2015,y-1] → 測試 [y]，
+  y=2020..2025 共 6 fold）、`strategy/ablation.py`（A 固定權重無機制／B 固定權重+機制曝險／
+  C 動態權重+機制曝險／D ML+機制曝險 四版本對照——D 版會需要同時啟用 Task 4 的
+  `use_regime_weights` 與 Task 5 的 `use_ml_composite`，但這兩個參數目前互斥會丟
+  `ValueError`，動工前要先決定兩者結合的語意，見下方）、`strategy/significance.py`
+  （deflated Sharpe／信賴區間／bootstrap p-value）、`strategy/attribution.py`（報酬歸因）。
+- **Task 6 的 ablation D 需要先擴充 `quant_layer2.py` 的機制／ML 組合語意**：目前
+  `use_regime_weights`（機制靜態權重排名＋曝險縮放）與 `use_ml_composite`（ML 分數排名，
+  曝險固定 1.0）是互斥的，同時開啟會丟 `ValueError`（Task 5 完成時刻意這樣設計，見
+  `docs/DECISIONS.md`「Task 5」那筆）。做 ablation D 時要決定：用 ML 分數排名選股、
+  再乘上機制曝險比例？還是別的組合方式？這是 Task 6 開工前的第一個設計決定，不是
+  Task 5 遺留的 bug。
 - **LINE_NOTIFY_TOKEN / NOTION_TOKEN / NOTION_DATABASE_ID 仍未設定**，Task 8 驗收前需要你
   另外申請並補進 `.env`，這不是我能代勞的部分（Task 8 通知功能設計成 token 不存在時自動
   降級成 dry-run，不會因此卡住其他 Task，但沒有這些 token 就無法驗收真實通知有沒有送達）。
 - **Task 7（存活者偏誤）的優先度因為 Task 3 執行的資料延伸而提高**（回測曝險時間從 11 年
   拉長到 14 年），建議 Task 6/7 排序時把這個納入考量。
-- **Task 4 發現的機制版績效落差**（13.6% vs 92.1%）值得在 Task 5 完成、有 ML 版本可以
-  比較之後，一併重新評估要不要調整 Task 3 的機制校準方式（見上方 Task 4 細節）。
+- **Task 4 發現的機制版績效落差**（13.6% vs 92.1%）與 **Task 5 的 ML 版好壞參半結果**
+  （年化/Sharpe 略優、回撤/換手率更差，見上方 Task 5 細節）都值得在 Task 6 的 ablation
+  跑完、能同條件對照四個版本之後，一併重新評估要不要調整 Task 3 的機制校準方式或
+  Task 5 的訓練策略（例如因子穩定性分析報告裡「最近三年加權平均」那個備選方案）。
 
 ---
 
