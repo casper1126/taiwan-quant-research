@@ -4,11 +4,13 @@
 比對對象：`CLAUDE_CODE_TASKS.md`（Task 1-9 內容逐字轉錄自
 `CLAUDE_CODE_TASKS.md.pdf`，另外加了規則 9-11，見該檔案開頭說明）。
 
-**最後更新：2026-08-23（Task 1-6 完成後）**——本文件前半段（§0、環境注意
-事項、Task 1/2 細節、402 事故報告）是 2026-08-17～18 寫的，反映當時的
-狀態；Task 3、4、5、6 完成後的最新狀態記錄在下方「Task 1–9 完成度總表」與
-新增的 Task 3／Task 4／Task 5／Task 6 細節小節裡。決策過程的完整記錄在
-[docs/DECISIONS.md](DECISIONS.md)，這裡只總結結論。
+**最後更新：2026-08-23（Task 1-7 完成後，含 Task 6c 後續診斷）**——本文件前半段
+（§0、環境注意事項、Task 1/2 細節、402 事故報告）是 2026-08-17～18 寫的，反映
+當時的狀態；Task 3、4、5、6、7 完成後的最新狀態記錄在下方「Task 1–9 完成度
+總表」與新增的 Task 3／Task 4／Task 5／Task 6／Task 7 細節小節裡（Task 6 的
+細節小節內也含 2026-08-23 的後續診斷：策略跑輸 TAIEX 主要是台積電集中度效應，
+不是選股能力本身特別差，但對真實市值加權 TAIEX 顯著跑輸的原始發現不變）。
+決策過程的完整記錄在 [docs/DECISIONS.md](DECISIONS.md)，這裡只總結結論。
 
 ## 執行紀錄
 
@@ -124,7 +126,7 @@ Task 1-9 的範圍外，維持獨立、不整合）。Task 3 的 `regime/` 模�
 | 5 | ML 因子合成 | **✅ 完成**（`strategy/ml_composite.py` 全部建立；9 個 walk-forward fold 全部訓練成功；SHAP／逐年 importance／因子穩定性分析三份報告全部真實產出） | 見下方「Task 5 細節」 |
 | 6 | 驗證框架 | **✅ 完成**（Walk-Forward／Ablation A-D／統計顯著性／績效歸因全部真實跑完；3/4 驗收項目通過，1 項延續 Task 4 已知取捨誠實未通過） | 見下方「Task 6 細節」 |
 | 7 | 研究誠信模組 | **✅ 完成**（三份報告/圖全部真實產出；survivorship 含量化估計，且誠實揭露了「無法精確量化」這個發現本身） | 見下方「Task 7 細節」 |
-| 8 | 自動化整合 | **部分完成，且目前壞掉** | 見下方（`daily_update.py` 有 SyntaxError） |
+| 8 | 自動化整合 | **未開始 (0%)**，但原本的 SyntaxError 已修復、`requirements1.txt` 已補齊，前置阻礙已清除 | 見下方「Task 8 細節」 |
 | 9 | 文件與發布 | **未開始** | README 現況以 Discord bot 為敘事核心，非作品集規格 |
 
 **整體完成度：7/9 Task（約 78%）**
@@ -446,6 +448,17 @@ rev_yoy 最小 +6.5%（權重 0.18）；擇時貢獻 +27.7%；成本拖累 -8.3%
 pytest 全部 67/67 通過。`quant_layer2.py` 新增 `use_fixed_weights`／`fixed_weights` 參數
 （Task 6b/6d 需要的固定權重與單因子版模式）。
 
+**6c 後續診斷（2026-08-23，`strategy/benchmark_concentration.py`，
+`reports/benchmark_concentration_analysis.md`）**：針對「策略顯著跑輸市值加權 TAIEX」
+這個發現，額外診斷這是選股能力問題還是大盤被台積電這種巨型股撐起來的集中度效應。用
+「移除法」真實計算：台積電貢獻代理市值加權指數總報酬至少 18.9%（代理指數用成交量代理
+市值，方法論限制導致這個數字可能低估，已誠實揭露）。策略對排除台積電的代理 TAIEX
+（p=0.5074）與等權重代理 TAIEX（p=0.4192）都**不再顯著跑輸**——代表原本的負面結果主要
+是大盤集中度效應，不是選股能力本身特別差。**但策略對真實市值加權 TAIEX 顯著跑輸這個
+原始發現完全沒有改變**（p=0.0272，不變），Task 9 寫 README 時兩個發現都要並列呈現，
+不能只挑對策略有利的半句話。新增 `tests/test_benchmark_concentration.py`（5 項），
+pytest 全部 72/72 通過。完整決策記錄見 `docs/DECISIONS.md`「Task 6c 後續診斷」那筆。
+
 ### Task 7 細節（研究誠信模組）—— ✅ 完成（2026-08-23）
 
 **7a 存活者偏誤**（`data_pipeline/survivorship.py`，`reports/survivorship_analysis.md`）：
@@ -474,16 +487,24 @@ FinMind 現行清單」判斷下市會被污染 (2) 改用自家資料庫 stalen
 新增 13 項測試，pytest 全部 85/85 通過。`data_pipeline/schema.py` 新增 `delisted_stocks`
 表；`requirements1.txt` 補 `tejapi`。
 
-### Task 8 細節（自動化整合）——⚠️ 目前處於壞掉狀態
+### Task 8 細節（自動化整合）—— 尚未開始，但前置阻礙已清除
 
+- **原本記錄的 SyntaxError 已修復**（`automation/daily_update.py` 第 493 行 `return` outside
+  function 的問題，見下方「問題清單」第 1 項），2026-08-23 重新用 `python -m py_compile`
+  確認過可以正常編譯，不再是「完全無法執行」的狀態——但還沒有真的跑過完整流程驗證。
 - `automation/daily_update.py` 有 Step 1a（價格/估值增量）與 Step 1b（法人資料增量），但**沒有**
-  融資融券、TAIEX 的增量更新，也**沒有**機制訊號寫入 `signals/*.json` 的 `"regime"` 欄位
-- `automation/notifier.py` 只有 LINE + Notion，機制降級警示邏輯不存在
-- **發現一個會擋住整支腳本執行的 bug**：`automation/daily_update.py` 第 493 行在
-  `if __name__ == "__main__":` 區塊裡直接寫 `return`，但這裡不在任何函式內 ——
-  這是 Python 的 `SyntaxError`（`'return' outside function`），代表**目前
-  `python automation/daily_update.py` 完全無法執行，連 import 都會失敗**。細節見下方「問題清單」。
-- `requirements1.txt` 缺 `hmmlearn`、`matplotlib`、`shap`、`pytest`
+  融資融券、TAIEX 的增量更新，也**沒有**機制訊號寫入 `signals/*.json` 的 `"regime"` 欄位——
+  這些是 Task 8 要新增的功能，不是修復既有 bug
+- `automation/notifier.py` 只有 LINE + Notion，機制降級警示邏輯不存在，也是 Task 8 待新增
+- `requirements1.txt` 目前已完整（`hmmlearn`／`matplotlib`／`shap`／`pytest`／`tejapi` 都已經
+  在 Task 3/5/7 陸續補齊），Task 8 開工前不用再處理這個問題
+- **建議的執行方式（尚未開始，記錄下來給 Task 8 開工時參考）**：`LINE_NOTIFY_TOKEN`／
+  `NOTION_TOKEN`／`NOTION_DATABASE_ID` 目前都沒有設定，Task 8 應該先用 dry-run 模式開發
+  （token 不存在時 `notifier.py` 本來就會自動降級成 dry-run，不會噴錯），把增量更新／機制
+  訊號／JSON 輸出的邏輯都做完並手動跑過一次完整流程（`python automation/daily_update.py`
+  端到端跑一次，確認 Step 1a-1b 增量更新、機制訊號計算、`signals/*.json` 輸出都正確），
+  等這些都驗證沒問題後，再由你補上真實的 LINE/Notion token 驗收真實通知有沒有送達——
+  不要一開始就假設 token 已經有了去設計流程，會卡在驗收階段才發現問題。
 
 ### Task 9 細節（文件與發布）
 
@@ -640,7 +661,9 @@ feature importance）、`factor_stability_analysis.md`（Task 5 因子穩定性�
 
 4. ~~**requirements1.txt 缺依賴**~~ **已修復**——`matplotlib`、`pytest` 於 Task 2 期間補進
    （venv 被整個重建後，這兩個套件連同其他非 `requirements1.txt` 套件全部消失，見上方
-   「環境注意事項」第三輪）；`hmmlearn` 於 Task 3 開工前補進；`shap` 於 Task 5 補進。
+   「環境注意事項」第三輪）；`hmmlearn` 於 Task 3 開工前補進；`shap` 於 Task 5 補進；
+   `tejapi` 於 Task 7a 補進（`data_pipeline/survivorship.py` 的 TEJ 可用性檢查要用，
+   真實測試後發現金鑰已過期，改走 FinMind fallback，見 Task 7 細節）。
    `bot.py` 用到的 `discord.py` 還沒補回去，因為 `bot.py` 目前停用中，
    見 `_disabled/discord/README_RESTORE.md`（這個不影響 Task 1-9 的範圍，維持現狀）。
 
@@ -777,9 +800,13 @@ margin_trading 階段新增 1866 檔（失敗 0，跳過 229 檔含真無資料�
   確認過，之前 Task 1 期間發現的 SyntaxError 確實已修復，不是過時的舊筆記——但 Task 8
   升級增量更新/機制訊號/LINE 通知這些新功能時，仍然要跑一次端到端的真實執行，不能只看
   編譯通過就當作完成）。
-- **LINE_NOTIFY_TOKEN / NOTION_TOKEN / NOTION_DATABASE_ID 仍未設定**，Task 8 驗收前需要你
-  另外申請並補進 `.env`，這不是我能代勞的部分（Task 8 通知功能設計成 token 不存在時自動
-  降級成 dry-run，不會因此卡住其他 Task，但沒有這些 token 就無法驗收真實通知有沒有送達）。
+- **Task 8 尚未開始，建議的執行方式**：`LINE_NOTIFY_TOKEN`／`NOTION_TOKEN`／
+  `NOTION_DATABASE_ID` 目前都沒有設定，Task 8 應該先用 dry-run 模式開發（token 不存在時
+  `notifier.py` 本來就會自動降級成 dry-run，不會噴錯，不會因此卡住開發），把增量更新／
+  機制訊號／`signals/*.json` 輸出這些邏輯都做完，**手動完整跑一次全流程**
+  （`python automation/daily_update.py` 端到端跑一次，確認每個步驟都正確）驗證過沒問題後，
+  再由你補上真實的 token 到 `.env`（這不是我能代勞的部分）驗收真實通知有沒有送達——不要
+  一開始就假設 token 已經有了去設計流程。
 - **Task 7a 的存活者偏誤發現需要在 Task 9 README 撰寫時直接引用**：本專案目前沒有可靠
   資料源能精確量化真實下市檔數（TEJ 金鑰過期、FinMind 現行清單比對會被股票代號回收
   污染），已經準備好一段可以直接貼進 README Limitations 的英文段落（見
@@ -806,9 +833,6 @@ margin_trading 階段新增 1866 檔（失敗 0，跳過 229 檔含真無資料�
   分析報告裡「最近三年加權平均」備選方案），目前累積的證據已經足夠支持你做這個決定，
   不需要更多實驗；如果決定要調整，建議在 Task 8（自動化整合，機制訊號會寫進每日通知）
   之前定案，避免調整後還要重新驗證自動化流程。
-- **LINE_NOTIFY_TOKEN / NOTION_TOKEN / NOTION_DATABASE_ID 仍未設定**，Task 8 驗收前需要你
-  另外申請並補進 `.env`，這不是我能代勞的部分（Task 8 通知功能設計成 token 不存在時自動
-  降級成 dry-run，不會因此卡住其他 Task，但沒有這些 token 就無法驗收真實通知有沒有送達）。
 
 ---
 
