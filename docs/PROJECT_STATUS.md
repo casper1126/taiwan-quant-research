@@ -526,6 +526,7 @@ pytest 全部 67/67 通過。`quant_layer2.py` 新增 `use_fixed_weights`／`fix
 | `ablation.py` | **新增（Task 6b）**：A/B/C/D 四版本同條件對照 + 機制分段績效 |
 | `significance.py` | **新增（Task 6c）**：Deflated Sharpe Ratio／Lo(2002) 信賴區間／Bootstrap p-value |
 | `attribution.py` | **新增（Task 6d）**：總報酬恆等式分解（因子邊際貢獻+擇時貢獻-成本+殘差） |
+| `benchmark_concentration.py` | **新增（Task 6c 後續診斷）**：台積電對 TAIEX 總報酬的貢獻（移除法）、策略 vs 排除台積電/等權重基準的顯著性檢定 |
 
 ### `regime/`（**新增，Task 3**，機制偵測模組，只被 `quant_layer2.py` 呼叫，不反向依賴它）
 
@@ -584,7 +585,8 @@ feature importance）、`factor_stability_analysis.md`（Task 5 因子穩定性�
 比較實驗）、`walk_forward_results.{md,json}`（Task 6a walk-forward OOS 驗證）、
 `ablation_results.md`（Task 6b A/B/C/D 同條件對照＋機制分段績效）、
 `significance_report.md`（Task 6c 統計顯著性檢定）、`attribution_report.md`
-（Task 6d 績效歸因恆等式分解）。
+（Task 6d 績效歸因恆等式分解）、`benchmark_concentration_analysis.md`
+（Task 6c 後續診斷：台積電集中度對「策略跑輸大盤」發現的補充脈絡）。
 
 ### `.github/workflows/daily_quant.yml` 與 `github/workflows/daily_quant.yml`
 
@@ -745,6 +747,14 @@ margin_trading 階段新增 1866 檔（失敗 0，跳過 229 檔含真無資料�
   優勢也**不具統計顯著性**。Task 9 撰寫 README 的 Limitations 章節時，不能只挑對策略
   有利的指標（例如波動度更低、回撤更小）來寫，這個「絕對報酬跑輸大盤」的結果要並列
   說明，這是本專案研究誠信原則的核心測試——不能因為結果不好看就選擇性引用。
+  **後續已補充診斷**（2026-08-23，`strategy/benchmark_concentration.py`、
+  `reports/benchmark_concentration_analysis.md`）：這個負面結果排查後發現主要是「大盤
+  被台積電這一檔巨型股撐起來」的集中度效應（台積電貢獻代理指數總報酬至少 18.9%，
+  且這個數字有方法論限制、可能是低估值）——策略對排除台積電／等權重大盤都不再顯著
+  跑輸。**但對真實市值加權 TAIEX（README 應該採用的標準基準）仍然顯著跑輸這個原始
+  發現完全沒有改變**，Task 9 寫 README 時兩個發現（原始負面結果 + 補充脈絡）都要寫，
+  不能只挑對策略有利的半句話，完整決策記錄見 `docs/DECISIONS.md`
+  「Task 6c 後續診斷」那筆。
 - **Task 4 發現的機制版績效落差**、**Task 5 的 ML 版好壞參半結果**、**Task 6b Ablation
   的同條件對照**三者現在都有完整的真實數字可以互相對照（見上方 Task 4/5/6 細節），
   一致指向同一個結論：機制曝險在這段史詩級多頭期間會系統性犧牲報酬換取低波動與低回撤，
