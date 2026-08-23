@@ -123,11 +123,11 @@ Task 1-9 的範圍外，維持獨立、不整合）。Task 3 的 `regime/` 模�
 | 4 | 機制整合到策略 | **✅ 完成**（`REGIME_FACTOR_WEIGHTS`／曝險整合／`strategy/portfolio.py` 全部完成；3 項驗收全過；發現機制版績效遠低於基準版，已記錄非阻斷） | 見下方「Task 4 細節」 |
 | 5 | ML 因子合成 | **✅ 完成**（`strategy/ml_composite.py` 全部建立；9 個 walk-forward fold 全部訓練成功；SHAP／逐年 importance／因子穩定性分析三份報告全部真實產出） | 見下方「Task 5 細節」 |
 | 6 | 驗證框架 | **✅ 完成**（Walk-Forward／Ablation A-D／統計顯著性／績效歸因全部真實跑完；3/4 驗收項目通過，1 項延續 Task 4 已知取捨誠實未通過） | 見下方「Task 6 細節」 |
-| 7 | 研究誠信模組 | **未開始 (0%)**，優先度因資料延伸而提高 | `survivorship.py` / `decay_monitor.py` / `capacity.py` 均不存在；見下方「存活者偏誤」提醒 |
+| 7 | 研究誠信模組 | **✅ 完成**（三份報告/圖全部真實產出；survivorship 含量化估計，且誠實揭露了「無法精確量化」這個發現本身） | 見下方「Task 7 細節」 |
 | 8 | 自動化整合 | **部分完成，且目前壞掉** | 見下方（`daily_update.py` 有 SyntaxError） |
 | 9 | 文件與發布 | **未開始** | README 現況以 Discord bot 為敘事核心，非作品集規格 |
 
-**整體完成度：6/9 Task（約 67%）**
+**整體完成度：7/9 Task（約 78%）**
 
 ### Task 1 細節（資料補完）—— 最新狀態
 
@@ -446,10 +446,33 @@ rev_yoy 最小 +6.5%（權重 0.18）；擇時貢獻 +27.7%；成本拖累 -8.3%
 pytest 全部 67/67 通過。`quant_layer2.py` 新增 `use_fixed_weights`／`fixed_weights` 參數
 （Task 6b/6d 需要的固定權重與單因子版模式）。
 
-### Task 7 細節（研究誠信模組）
+### Task 7 細節（研究誠信模組）—— ✅ 完成（2026-08-23）
 
-`data_pipeline/survivorship.py`、`regime/decay_monitor.py`、`strategy/capacity.py` 都不存在，
-對應報告 `survivorship_analysis.md`、`factor_decay_history.png`、`capacity_analysis.md` 也都沒有。
+**7a 存活者偏誤**（`data_pipeline/survivorship.py`，`reports/survivorship_analysis.md`）：
+真的用既有 TEJ 試用金鑰測試 `TRAIL/AIND`，證實金鑰已過期（訂閱區間
+2026-04-27～2026-07-27，早已過期），改用任務書規格的 FinMind fallback。過程中發現
+兩個重要方法論限制：(1) 股票代號會被回收給新公司（例如代號 1262），用「代號是否還在
+FinMind 現行清單」判斷下市會被污染 (2) 改用自家資料庫 staleness 訊號抓到 97/2056
+（4.7%）候選失效股票，但交叉比對後這 97 檔**全部**仍在 FinMind 現行清單裡——代表這個
+訊號主要反映本專案自己的資料管線覆蓋缺口，不是真正下市。**誠實結論：本專案目前沒有
+可靠資料源能精確量化真實下市檔數**，改用 Shumway (1997) 文獻估計值（2-4%/年）當替代
+基準，附上 README Limitations 建議英文段落。97 筆候選（含 confidence 標記）寫入新增的
+`delisted_stocks` SQLite 表。
+
+**7b 因子衰退監控**（`regime/decay_monitor.py`，`reports/factor_decay_history.png`）：
+追蹤 6 個因子（momentum/value/rev_yoy/low_vol/margin_usage/inst_flow）的 252 日滾動
+|IC|，跟展開式（避免 look-ahead）長期均值比較，<50% 判定衰退。真實結果：**目前 6 個
+因子全部正常，沒有衰退**。額外輸出 `reports/factor_decay_alerts_latest.json`，是 Task 8
+未來 `signals/*.json` 的 `factor_decay_alerts` 欄位的真實快照範例。
+
+**7c 策略容量分析**（`strategy/capacity.py`，`reports/capacity_analysis.md`）：ADV 5% 規則，
+對 Task 2 基準策略 22 次真實換倉逐一反推最大可佈署資金。**最新一次換倉（2025-11-04）
+容量估計約 NT$ 2.63 億元**，全期中位數約 NT$ 1.07 億元。
+
+**驗收結果**：三份報告/圖全部真實產出 ✅；survivorship 含量化估計 ✅（自家資料 4.7% 缺口
++ 文獻 2-4%/年，兩者並陳，且誠實記錄了「無法精確量化」本身這個發現）。`tests/test_task7.py`
+新增 13 項測試，pytest 全部 85/85 通過。`data_pipeline/schema.py` 新增 `delisted_stocks`
+表；`requirements1.txt` 補 `tejapi`。
 
 ### Task 8 細節（自動化整合）——⚠️ 目前處於壞掉狀態
 
@@ -503,6 +526,7 @@ pytest 全部 67/67 通過。`quant_layer2.py` 新增 `use_fixed_weights`／`fix
 | `download_supplementary.py` | **新增（Task 1）**：FinMind 融資融券 + TAIEX 下載（固定節奏速率控制、斷點續傳） |
 | `fetch_stock_names.py` | 抓股票代號↔名稱對照表 |
 | `update_prices_fugle.py` | Fugle API 增量股價更新（FinMind 的替代來源，任務文件未提及） |
+| `survivorship.py` | **新增（Task 7a）**：TEJ 可用性檢查（真實測試，發現金鑰過期）+ FinMind fallback 量化缺口，寫入 `delisted_stocks` 表 |
 
 ### `strategy/`
 
@@ -527,6 +551,7 @@ pytest 全部 67/67 通過。`quant_layer2.py` 新增 `use_fixed_weights`／`fix
 | `significance.py` | **新增（Task 6c）**：Deflated Sharpe Ratio／Lo(2002) 信賴區間／Bootstrap p-value |
 | `attribution.py` | **新增（Task 6d）**：總報酬恆等式分解（因子邊際貢獻+擇時貢獻-成本+殘差） |
 | `benchmark_concentration.py` | **新增（Task 6c 後續診斷）**：台積電對 TAIEX 總報酬的貢獻（移除法）、策略 vs 排除台積電/等權重基準的顯著性檢定 |
+| `capacity.py` | **新增（Task 7c）**：ADV 5% 規則反推策略最大可佈署資金 |
 
 ### `regime/`（**新增，Task 3**，機制偵測模組，只被 `quant_layer2.py` 呼叫，不反向依賴它）
 
@@ -539,6 +564,7 @@ pytest 全部 67/67 通過。`quant_layer2.py` 新增 `use_fixed_weights`／`fix
 | `ml_alert.py` | LightGBM 崩盤預警，walk-forward（3d） |
 | `regime_engine.py` | 分類規則 + hysteresis 整合（3e），`REGIME_FACTOR_WEIGHTS` 命名易混淆處見檔案內註解 |
 | `plot_regimes.py` | 產出 `reports/regime_history.png`（3f） |
+| `decay_monitor.py` | **新增（Task 7b）**：6 個因子 252 日滾動 \|IC\| vs 展開式長期均值，衰退判定，輸出 `factor_decay_history.png` |
 
 ### `tests/`
 
@@ -551,8 +577,10 @@ pytest 全部 67/67 通過。`quant_layer2.py` 新增 `use_fixed_weights`／`fix
 | `test_portfolio.py` | **新增（Task 4）**：`strategy/portfolio.py` 單元測試（7 項） |
 | `test_ml_composite.py` | **新增（Task 5，2026-08-22 補充 2 項）**：`strategy/ml_composite.py` 單元測試 + `quant_layer2.py` 的 `use_ml_composite`／`use_regime_factor_weights`／`use_regime_exposure` 整合測試（12 項） |
 | `test_task6.py` | **新增（Task 6）**：`walk_forward.py`／`ablation.py`／`significance.py`／`attribution.py` 純邏輯函式測試，合成資料，含 DSR 單位換算 bug 的迴歸測試（14 項） |
+| `test_benchmark_concentration.py` | **新增（Task 6c 後續診斷）**：代理市值權重、移除法貢獻計算的邏輯測試（5 項） |
+| `test_task7.py` | **新增（Task 7）**：`survivorship.py`／`decay_monitor.py`／`capacity.py` 純邏輯函式測試，合成資料（13 項） |
 
-**pytest 現況：67/67 全過。**
+**pytest 現況：85/85 全過。**
 
 ### `automation/`
 
@@ -586,7 +614,10 @@ feature importance）、`factor_stability_analysis.md`（Task 5 因子穩定性�
 `ablation_results.md`（Task 6b A/B/C/D 同條件對照＋機制分段績效）、
 `significance_report.md`（Task 6c 統計顯著性檢定）、`attribution_report.md`
 （Task 6d 績效歸因恆等式分解）、`benchmark_concentration_analysis.md`
-（Task 6c 後續診斷：台積電集中度對「策略跑輸大盤」發現的補充脈絡）。
+（Task 6c 後續診斷：台積電集中度對「策略跑輸大盤」發現的補充脈絡）、
+`survivorship_analysis.md`（Task 7a 存活者偏誤，含 README Limitations 建議英文段落）、
+`factor_decay_history.png`／`factor_decay_alerts_latest.json`（Task 7b 因子衰退監控）、
+`capacity_analysis.md`（Task 7c 策略容量分析）。
 
 ### `.github/workflows/daily_quant.yml` 與 `github/workflows/daily_quant.yml`
 
@@ -729,17 +760,30 @@ margin_trading 階段新增 1866 檔（失敗 0，跳過 229 檔含真無資料�
 配額用盡 → 自動休眠 25 分鐘 → 整點自動恢復，全程無人工介入。最終數字見上方 Task 1 細節，
 三項驗收全部通過。
 
-## 4. 建議的執行起點（2026-08-23 更新：Task 1-6 已完成，這裡是給 Task 7 開始前的提醒）
+## 4. 建議的執行起點（2026-08-23 更新：Task 1-7 已完成，這裡是給 Task 8 開始前的提醒）
 
-- **Task 1-6 全部完成**，本節以下內容是歷史記錄（Task 1 剛開始時寫的），保留給未來回顧
+- **Task 1-7 全部完成**，本節以下內容是歷史記錄（Task 1 剛開始時寫的），保留給未來回顧
   時參考當時的判斷依據。
-- **下一步是 Task 7（研究誠信模組）**：`data_pipeline/survivorship.py`（存活者偏誤，保底
-  必做 `reports/survivorship_analysis.md`，文獻估計引 Shumway 1997）、
-  `regime/decay_monitor.py`（因子衰退監控，252 日滾動 IC，`reports/factor_decay_history.png`）、
-  `strategy/capacity.py`（ADV 5% 規則，`reports/capacity_analysis.md`）。
-- **Task 7（存活者偏誤）的優先度因為 Task 3 執行的資料延伸而提高**（回測曝險時間從 11 年
-  拉長到 14 年），這是任務書原本就排在後面、但因為這次專案的資料延伸決定而應該提前重視
-  的項目，建議 Task 7 開工時把這個列為第一個要做的子項目（7a）。
+- **下一步是 Task 8（自動化整合）**：`automation/daily_update.py` 升級（增量更新加入
+  三大法人/融資/TAIEX；每日算機制訊號寫入 signals JSON 的 `"regime"` 欄位；LINE 通知
+  加當日機制+健康分數，機制降級時發警示）、Notion 欄位（市場機制/健康分數）、
+  `requirements1.txt` 確認完整（已補齊 hmmlearn/lightgbm/scipy/matplotlib/shap/pytest/
+  tejapi）、GitHub Actions workflow 確認正常。
+- **Task 8 可以直接掛上 Task 7b 的因子衰退警示**：`regime/decay_monitor.py` 的
+  `latest_alerts()` 已經是可以直接呼叫的函式，回傳格式已經對齊 `factor_decay_alerts`
+  這個 JSON 欄位需要的結構（見 `reports/factor_decay_alerts_latest.json` 的真實範例），
+  Task 8 升級 `daily_update.py` 時可以直接呼叫，不用重新設計格式。
+- **`automation/daily_update.py` 目前可以正常編譯**（2026-08-23 重新用 `python -m py_compile`
+  確認過，之前 Task 1 期間發現的 SyntaxError 確實已修復，不是過時的舊筆記——但 Task 8
+  升級增量更新/機制訊號/LINE 通知這些新功能時，仍然要跑一次端到端的真實執行，不能只看
+  編譯通過就當作完成）。
+- **LINE_NOTIFY_TOKEN / NOTION_TOKEN / NOTION_DATABASE_ID 仍未設定**，Task 8 驗收前需要你
+  另外申請並補進 `.env`，這不是我能代勞的部分（Task 8 通知功能設計成 token 不存在時自動
+  降級成 dry-run，不會因此卡住其他 Task，但沒有這些 token 就無法驗收真實通知有沒有送達）。
+- **Task 7a 的存活者偏誤發現需要在 Task 9 README 撰寫時直接引用**：本專案目前沒有可靠
+  資料源能精確量化真實下市檔數（TEJ 金鑰過期、FinMind 現行清單比對會被股票代號回收
+  污染），已經準備好一段可以直接貼進 README Limitations 的英文段落（見
+  `reports/survivorship_analysis.md` 第 5 節），Task 9 不用重新寫。
 - **Task 6c 統計顯著性檢定發現一個重要的誠實結果，需要在 Task 9 README 撰寫時如實揭露**：
   Task 2 基準策略在 2015-2026 這段回測期間，逐日報酬「顯著地」跑輸 TAIEX 買進持有
   （bootstrap p-value 0.0272，年化落後約 7.4 個百分點），這段期間台股經歷史詩級大多頭。

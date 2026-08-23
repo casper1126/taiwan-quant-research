@@ -171,6 +171,19 @@ TABLE_DDL = {
             volume      REAL,
             PRIMARY KEY (date, index_id)
         )""",
+
+    "delisted_stocks": """
+        CREATE TABLE IF NOT EXISTS delisted_stocks (
+            stock_id          TEXT NOT NULL,
+            first_seen_date   TEXT,
+            last_seen_date    TEXT,
+            days_stale        INTEGER,
+            detection_method  TEXT NOT NULL,
+            confidence        TEXT NOT NULL,
+            note              TEXT,
+            detected_at       TEXT DEFAULT (datetime('now','localtime')),
+            PRIMARY KEY (stock_id, detection_method)
+        )""",
 }
 
 TABLE_INDEXES = [

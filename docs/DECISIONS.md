@@ -6,6 +6,75 @@
 
 ---
 
+## 2026-08-23 — Task 7：研究誠信模組完整結果（存活者偏誤／因子衰退／容量分析）
+
+**狀態：三個子任務全部真實跑完，三份報告/圖全部產出，survivorship 含量化估計**
+
+**7a 存活者偏誤**（`data_pipeline/survivorship.py`，`reports/survivorship_analysis.md`）：
+
+先真的用這個專案既有的 TEJ 試用金鑰（見 `test_tej.py`）打一次 `TRAIL/AIND`，
+**證實金鑰已過期**（訂閱區間 2026-04-27～2026-07-27，執行時是 2026-08-23，
+過期約一個月，API 回傳 `AAA003 認證失敗，api_key已過期`）——這是真實測試
+出來的結果，不是假設 TEJ 不可用就跳過。改用任務書規格的 fallback：FinMind
+TaiwanStockInfo 歷史比對。
+
+過程中發現並誠實記錄兩個重要的方法論限制：
+1. **股票代號回收問題**：用「代號是否還在 FinMind 現行清單」判斷下市，會被
+   台股代號回收給新公司污染（例如代號 1262，本專案資料庫舊資料在
+   2020-09-24 停止更新，但 FinMind 現行清單顯示這個代號目前是完全不同的
+   公司「綠悅-KY」）。
+2. **改用自家資料庫 staleness 訊號後的交叉驗證發現**：研究期間
+   （2015-2026）共 2056 檔股票，97 檔（4.7%）相對資料庫最新日超過 180 天
+   沒更新，是候選失效名單。但交叉比對 FinMind 現行清單後發現：**這 97 檔
+   全部（100%）仍出現在 FinMind 現行清單裡**——代表這個 staleness 訊號
+   主要反映的是本專案自己的資料下載管線覆蓋不全，不是真正的公司下市。
+   **這代表本專案目前沒有可靠的資料來源能精確量化「真正下市」的檔數。**
+
+因此改用文獻估計值當誠實的替代基準：Shumway (1997, *Journal of Finance*)
+估計忽略下市報酬會讓回測報酬平均被高估 **2-4 個百分點／年**，report 裡
+附上 README Limitations 建議英文段落，並把 97 筆候選（含 confidence
+low/medium 標記與判斷依據）寫進新增的 `delisted_stocks` SQLite 表，供之後
+補上真實市值/下市資料源時重新比對。
+
+**7b 因子衰退監控**（`regime/decay_monitor.py`，`reports/factor_decay_history.png`）：
+
+追蹤 6 個因子（momentum/value/rev_yoy/low_vol/margin_usage/inst_flow）的
+252 日滾動 |IC|，跟自己的展開式（expanding，避免 look-ahead）長期均值比較，
+近期 < 長期均值 50% 判定衰退。真實跑出：**目前（最新一天）6 個因子全部
+正常，沒有一個被判定衰退**（momentum 0.093 vs 長期 0.124、value 0.091 vs
+0.091、rev_yoy 0.058 vs 0.054、low_vol 0.122 vs 0.154、margin_usage 0.048
+vs 0.041、inst_flow 0.037 vs 0.038）。額外輸出
+`reports/factor_decay_alerts_latest.json`，是 Task 8 每日自動化未來要塞進
+`signals/*.json` 的 `factor_decay_alerts` 欄位的真實快照範例，證明這個
+功能已經可以直接被呼叫、不是空殼。
+
+**7c 策略容量分析**（`strategy/capacity.py`，`reports/capacity_analysis.md`）：
+
+用 ADV 5% 規則（單日下單量不超過個股 20 日均量的 5%），對 Task 2 基準策略
+的 22 次真實換倉逐一反推「最多能佈署多少資金」（受限的永遠是持股裡流動性
+最差的那一檔）。真實結果：**最新一次換倉（2025-11-04）容量估計約 NT$
+2.63 億元**（binding stock：2892），全期中位數約 NT$ 1.07 億元，範圍
+NT$ 3,200 萬～NT$ 2.7 億元，隨市場整體流動性變化而波動。
+
+**驗收結果**：三份報告/圖全部真實產出 ✅；survivorship 含量化估計
+（97/2056＝4.7% 的自家資料庫候選缺口 + Shumway 1997 的 2-4%/年文獻估計，
+兩者並陳）✅。
+
+**後果**：
+- 新增 `data_pipeline/survivorship.py`、`regime/decay_monitor.py`、
+  `strategy/capacity.py`；`data_pipeline/schema.py` 新增 `delisted_stocks`
+  表；`requirements1.txt` 補 `tejapi>=0.1.31`（讓 TEJ 可用性檢查在未來
+  重建 venv 後依然能真的嘗試，不會因為套件沒裝而直接跳過）
+- 新增 `tests/test_task7.py`（13 項，合成資料），pytest 全部 85/85 通過
+- Task 9（README）撰寫 Limitations 章節時，直接可以用
+  `reports/survivorship_analysis.md` 第 5 節現成的英文段落
+- 存活者偏誤問題目前無法精確量化（見上方兩個方法論限制），如果之後這個
+  專案補上真實股本/市值或官方下市資料源（例如重新訂閱 TEJ），
+  `delisted_stocks` 表與 `survivorship.py` 都設計成可以直接重跑取代目前
+  的估計值
+
+---
+
 ## 2026-08-23 — Task 6c 後續診斷：策略跑輸 TAIEX 是選股問題還是台積電效應？
 
 **狀態：診斷完成，補充脈絡，原本 Task 6c 的發現完整保留不變**

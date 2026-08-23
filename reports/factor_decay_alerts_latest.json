@@ -1,0 +1,32 @@
+{
+  "momentum": {
+    "recent_ic": 0.0933,
+    "long_term_mean": 0.1235,
+    "decayed": false
+  },
+  "value": {
+    "recent_ic": 0.0907,
+    "long_term_mean": 0.0907,
+    "decayed": false
+  },
+  "rev_yoy": {
+    "recent_ic": 0.0577,
+    "long_term_mean": 0.0542,
+    "decayed": false
+  },
+  "low_vol": {
+    "recent_ic": 0.1223,
+    "long_term_mean": 0.1541,
+    "decayed": false
+  },
+  "margin_usage": {
+    "recent_ic": 0.0481,
+    "long_term_mean": 0.0411,
+    "decayed": false
+  },
+  "inst_flow": {
+    "recent_ic": 0.0371,
+    "long_term_mean": 0.0384,
+    "decayed": false
+  }
+}
