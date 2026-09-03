@@ -444,9 +444,18 @@ def build_positions(factors: dict,
                     ml_scores: Optional[pd.DataFrame] = None,
                     use_ml_composite: bool = False,
                     use_fixed_weights: bool = False,
-                    fixed_weights: Optional[Dict[str, float]] = None) -> pd.DataFrame:
+                    fixed_weights: Optional[Dict[str, float]] = None,
+                    for_live_signal: bool = False) -> pd.DataFrame:
     """
     根據因子決定每天的持倉比例矩陣。
+
+    for_live_signal（Task 8 每日自動化用）：預設 False，回傳
+    `final_pos`（唯一一次 shift(1) 之後的版本，回測安全，today 那一列
+    其實是「用前一天資料決定、今天已經執行完的部位」）。設成 True 時
+    回傳 `timed_pos`（shift 之前），today 那一列才是「用到今天收盤為止
+    的全部資料所建議、應該明天執行」的即時訊號——回測絕對不能用這個
+    版本（會有 look-ahead），只有每日自動化產生「明天該持有什麼」的
+    即時訊號時才用。
 
     ── 換手率控制的三個機制 ──────────────────────────────────
     本版本解決了兩個導致換手率 1982% 的根本問題：
@@ -551,7 +560,6 @@ def build_positions(factors: dict,
     PER        = factors["PER"].reindex(columns=cols)
     value      = factors["value"].reindex(columns=cols)
     low_vol    = factors["low_vol"].reindex(columns=cols)
-    mom_120     = factors.get("mom_120", pd.DataFrame(np.nan, index=close.index, columns=cols)).reindex(columns=cols)
     div_yld     = factors.get("div_yld", pd.DataFrame(np.nan, index=close.index, columns=cols)).reindex(columns=cols)
     dollar_volume = factors.get("dollar_volume", pd.DataFrame(np.nan, index=close.index, columns=cols)).reindex(columns=cols)
     liquid_mask = factors.get("liquid_mask",
@@ -563,7 +571,7 @@ def build_positions(factors: dict,
     #       否則會喪失 value 因子的深度樣本。改為只用流動性與乖離作為過濾。
     valid = (bias < bias_cap) & liquid_mask
 
-    # ── 合成因子（IC 加權，四因子）──────────────────────────
+    # ── 合成因子（IC 加權，五因子）──────────────────────────
     #
     # 2026-08-18 決定（docs/DECISIONS.md、reports/factor_negative_findings.md）：
     # inst_flow 經四輪真實資料 IC 排查（正規化前後對照、資料補齊前後對照、
@@ -571,11 +579,35 @@ def build_positions(factors: dict,
     # 不是 bug，是這個定義下的因子在線性排名方法下對未來報酬沒有穩定預測力。
     # 移出主策略複合，留給 Task 5 的非線性/ML 方法重新評估。
     #
-    # 剩餘四因子權重（見下方 default_weights）：
-    # momentum 0.34 / value 0.18 / rev_yoy 0.18 / low_vol 0.30
-    # 依各自 2015-2026 全樣本實測 20 日 IC 均值的相對強弱正規化分配
-    # （momentum 0.038 / value 0.020 / rev_yoy 0.020 / low_vol 0.033，
-    # 總和 0.111 → 各自 IC / 總和），不是簡單平均分配。
+    # 2026-09-03 決定（Task 8 驗收時發現、補做的排查，見 docs/DECISIONS.md
+    # 「Task 8 驗收前疑點排查」那筆）：`mom_120`、`div_yld`、`dollar_volume`
+    # 是這個檔案在 Task 1-9 這個流程開始之前（2026-05-06 之前）就已經存在
+    # 的舊版「v5」補充因子，一直沒有經過跟 inst_flow／margin_usage 同等級
+    # 的 IC 排查與正式決定，卻透過下面的動態 IC 加權機制一直在真的參與
+    # 複合分數計算（不是只有在診斷報告裡好看而已）。這次補做完整排查：
+    #   - `dollar_volume`：不是報酬預測因子，只是用來定義流動性宇宙
+    #     （`liquid_mask`）跟限制單次調倉量（`max_pct_dv`），不需要 IC 測試，
+    #     維持現狀。
+    #   - `mom_120`（120 日動量）：全樣本 IC 均值 0.0212、ICIR 0.128，
+    #     低於 inst_flow／margin_usage 那次排查採用的 0.03 門檻，而且跟主
+    #     動量因子 `momentum` 的橫截面排名相關係數高達 0.692——本質上是
+    #     同一個動量主題的較弱、較冗餘版本，不是獨立訊號。**移出複合**
+    #     （`build_factors()` 仍會計算，因子診斷報告仍會顯示它的 IC，
+    #     只是不再進 `factor_map`／不再參與加權，避免看起來像被藏起來）。
+    #   - `div_yld`（股利殖利率）：全樣本 IC 均值 0.0424、ICIR 0.268——
+    #     是五個核心因子裡 IC 最高、ICIR 最高的，而且是唯一一個
+    #     2015-2026 逐年 IC 全部為正（沒有任何一年翻負）的因子。經濟邏輯
+    #     站得住腳：高股利殖利率股票通常是成熟、現金流穩定、市場相對低估
+    #     的公司，是文獻裡行之有年的價值/品質因子（例如股利殖利率異常，
+    #     跟 Fama-French 價值因子系出同源）。**正式納入複合**，不再是
+    #     「剛好留在程式碼裡」的狀態，下面的 `default_weights` 也已經
+    #     依真實 IC 重新計算，不是延續舊的四因子權重再硬塞一個進去。
+    #
+    # 五個核心因子權重（見下方 default_weights）：
+    # momentum 0.24 / value 0.14 / rev_yoy 0.13 / low_vol 0.22 / div_yld 0.27
+    # 依各自 2015-2026-08 全樣本實測 20 日 IC 均值的相對強弱正規化分配
+    # （momentum 0.0378 / value 0.0221 / rev_yoy 0.0199 / low_vol 0.0349 /
+    # div_yld 0.0424，總和 0.1571 → 各自 IC / 總和），不是簡單平均分配。
     #
     # cross_zscore 移到 factors/base.py（Task 2 模組化），這裡不再重複定義
     cross_zscore = factor_base.cross_zscore
@@ -588,7 +620,6 @@ def build_positions(factors: dict,
 
     factor_map = {
         "momentum": momentum,
-        "mom_120": mom_120,
         "value": value,
         "rev_yoy": rev_yoy,
         "low_vol": low_vol,
@@ -613,20 +644,20 @@ def build_positions(factors: dict,
 
     # 若某日所有因子 ic_rolling 為 0/NaN，fallback 回預設權重並排除不存在的因子
     #
-    # 2026-08-18 決定（docs/DECISIONS.md）：inst_flow 移出複合（見上方註解），
-    # 剩餘四個核心因子的 fallback 權重依實測 20 日 IC 均值的相對強弱正規化：
-    #   momentum 0.038 / value 0.020 / rev_yoy 0.020 / low_vol 0.033
-    #   → 總和 0.111 → momentum 0.34 / value 0.18 / rev_yoy 0.18 / low_vol 0.30
-    # mom_120、div_yld 是任務書規格之外的補充因子，fallback 權重給 0——它們仍
-    # 留在 factor_map 裡，資料充足時一樣會透過上面的動態 IC 加權機制拿到權重，
-    # 只是「資料不足時的預設值」嚴格照四因子配置，不稀釋掉。
+    # 2026-09-03 決定（docs/DECISIONS.md「Task 8 驗收前疑點排查」）：五個
+    # 核心因子（momentum/value/rev_yoy/low_vol/div_yld）的 fallback 權重
+    # 依 2015-2026-08 全樣本實測 20 日 IC 均值的相對強弱正規化：
+    #   momentum 0.0378 / value 0.0221 / rev_yoy 0.0199 / low_vol 0.0349 /
+    #   div_yld 0.0424 → 總和 0.1571 → 各自 IC / 總和
+    # （取代舊版只有四因子、div_yld 權重是 0 的設定——div_yld 這次正式排查
+    # 後確認是五個因子裡 IC 最高、ICIR 最高、逐年 IC 全部為正的因子，不該
+    # 繼續給 0 權重；mom_120 已經移出 factor_map，不會再出現在這裡）。
     default_weights = {
-        "momentum": 0.34,
-        "mom_120": 0.0,
-        "value": 0.18,
-        "rev_yoy": 0.18,
-        "low_vol": 0.30,
-        "div_yld": 0.0,
+        "momentum": 0.24,
+        "value": 0.14,
+        "rev_yoy": 0.13,
+        "low_vol": 0.22,
+        "div_yld": 0.27,
     }
     # 只保留 active 因子的預設權重並正規化
     active_default = {k: default_weights[k] for k in active_factors}
@@ -661,9 +692,12 @@ def build_positions(factors: dict,
     masked_composite = composite.where(valid, np.nan)
 
     # ── Task 4a：機制靜態權重合成（只有 use_regime_factor_weights=True 才用）──
-    # 只有四個核心因子（momentum/value/rev_yoy/low_vol）有定義在
-    # REGIME_FACTOR_WEIGHTS 裡；mom_120、div_yld 不是任務書規格因子，
-    # 機制模式下權重視為 0（不參與），跟動態 IC 模式的 fallback 邏輯一致。
+    # 只有四個任務書規格因子（momentum/value/rev_yoy/low_vol）有定義在
+    # REGIME_FACTOR_WEIGHTS 裡；div_yld（2026-09-03 正式納入複合，見上方
+    # 決定）目前機制模式下權重視為 0（不參與）——這是刻意維持 Task 4
+    # 原始規格範圍不擴大，不是遺漏，之後如果要把 div_yld 也納入機制權重，
+    # 需要另外決定四個機制狀態下 div_yld 各自該給多少權重，不能直接沿用
+    # 動態 IC 模式的比例。
     regime_core_factors = [f for f in ("momentum", "value", "rev_yoy", "low_vol")
                             if f in active_factors]
 
@@ -808,9 +842,10 @@ def build_positions(factors: dict,
     # ── 唯一一次 shift(1)：今日訊號，明日執行 ────────────────
     final_pos = timed_pos.shift(1).fillna(0.0)
 
-    avg_holdings = (final_pos > 0).sum(axis=1).replace(0, np.nan).mean()
+    result = timed_pos if for_live_signal else final_pos
+    avg_holdings = (result > 0).sum(axis=1).replace(0, np.nan).mean()
     print(f"  平均持倉檔數：{avg_holdings:.1f} 檔（目標 {top_n} 檔）")
-    return final_pos
+    return result
 
 
 # ══════════════════════════════════════════════════════════════
@@ -997,9 +1032,17 @@ def run_pipeline(top_n: Optional[int] = None,
                  ml_scores: Optional[pd.DataFrame] = None,
                  use_ml_composite: Optional[bool] = None,
                  use_fixed_weights: Optional[bool] = None,
-                 fixed_weights: Optional[Dict[str, float]] = None) -> Tuple[dict, pd.Series, pd.DataFrame]:
+                 fixed_weights: Optional[Dict[str, float]] = None,
+                 data_start: Optional[str] = None,
+                 data_end: Optional[str] = None,
+                 for_live_signal: bool = False) -> Tuple[dict, pd.Series, pd.DataFrame]:
     """
     Run the full pipeline with optional parameter overrides.
+
+    data_start/data_end（Task 8 每日自動化用）：覆蓋模組層級的 START_DATE／
+    END_DATE 常數，讓每天執行時可以把 end 設成「今天」而不是寫死的歷史
+    日期。不傳就完全維持既有行為（Task 2-6 所有既有呼叫端都不用改）。
+    for_live_signal 見 build_positions() 的說明。
 
     regime_df/use_regime_factor_weights/use_regime_exposure：Task 4 機制
     整合，2026-08-22 拆成兩個獨立開關（見 build_positions() 的 docstring
@@ -1029,9 +1072,11 @@ def run_pipeline(top_n: Optional[int] = None,
     use_regime_exposure = False if use_regime_exposure is None else use_regime_exposure
     use_ml_composite = False if use_ml_composite is None else use_ml_composite
     use_fixed_weights = False if use_fixed_weights is None else use_fixed_weights
+    data_start = START_DATE if data_start is None else data_start
+    data_end = END_DATE if data_end is None else data_end
 
     # Step 1：載入資料
-    data = load_matrices(DB_PATH, START_DATE, END_DATE)
+    data = load_matrices(DB_PATH, data_start, data_end)
     if data["close"].shape[1] < 5:
         raise RuntimeError("資料庫裡的股票不足 5 檔，無法做有意義的橫截面排名。")
 
@@ -1061,7 +1106,17 @@ def run_pipeline(top_n: Optional[int] = None,
         use_ml_composite=use_ml_composite,
         use_fixed_weights=use_fixed_weights,
         fixed_weights=fixed_weights,
+        for_live_signal=for_live_signal,
     )
+
+    if for_live_signal:
+        # positions 是 timed_pos（未 shift），拿去跑 run_backtest() 會有
+        # look-ahead，算出來的 stats/equity 是假的——乾脆不算，強迫呼叫端
+        # 只能用 positions.iloc[-1] 當今日訊號，不會不小心把污染過的績效
+        # 數字當真的顯示出來。
+        print("  ⚠️  for_live_signal=True：跳過回測，stats/equity 回傳 None"
+              "（positions 是即時訊號，不是回測安全版本）")
+        return None, None, positions
 
     # Step 5：回測
     stats, equity = run_backtest(data["close"], positions,

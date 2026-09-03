@@ -1,0 +1,92 @@
+{
+  "date": "2026-08-29",
+  "channel": "notion",
+  "mode": "dry_run",
+  "content": {
+    "Name": {
+      "title": [
+        {
+          "text": {
+            "content": "台股訊號 2026-08-29"
+          }
+        }
+      ]
+    },
+    "日期": {
+      "date": {
+        "start": "2026-08-29"
+      }
+    },
+    "持倉清單": {
+      "rich_text": [
+        {
+          "text": {
+            "content": "2412(7%), 2892(7%), 2890(7%), 2885(7%), 2474(6%), 3045(6%), 2887(6%), 4904(5%), 2891(5%), 2883(5%), 2882(3%), 2881(3%), 2886(3%), 5871(3%), 2880(3%), 2801(3%), 2618(3%), 2610(3%), 2603(3%), 2385(3%), 2347(1%), 2884(1%), 2615(1%), 2606(1%), 2912(1%), 2357(1%), 3702(1%), 2353(1%), 4938(1%), 2324(1%)"
+          }
+        }
+      ]
+    },
+    "年化報酬": {
+      "rich_text": [
+        {
+          "text": {
+            "content": ""
+          }
+        }
+      ]
+    },
+    "最大回撤": {
+      "rich_text": [
+        {
+          "text": {
+            "content": ""
+          }
+        }
+      ]
+    },
+    "Sharpe": {
+      "rich_text": [
+        {
+          "text": {
+            "content": ""
+          }
+        }
+      ]
+    },
+    "買入訊號": {
+      "rich_text": [
+        {
+          "text": {
+            "content": "2412, 2892, 2890, 2885, 2474, 3045, 2887, 4904, 2891, 2883, 2882, 2881, 2886, 5871, 2880, 2801, 2618, 2610, 2603, 2385, 2347, 2884, 2615, 2606, 2912, 2357, 3702, 2353, 4938, 2324"
+          }
+        }
+      ]
+    },
+    "賣出訊號": {
+      "rich_text": [
+        {
+          "text": {
+            "content": "無"
+          }
+        }
+      ]
+    },
+    "完整JSON": {
+      "rich_text": [
+        {
+          "text": {
+            "content": "{\"signals\": [{\"stock_id\": \"2412\", \"stock_name\": \"中華電\", \"action\": \"BUY\", \"weight\": 0.0679}, {\"stock_id\": \"2892\", \"stock_name\": \"第一金\", \"action\": \"BUY\", \"weight\": 0.0656}, {\"stock_id\": \"2890\", \"stock_name\": \"永豐金\", \"action\": \"BUY\", \"weight\": 0.0656}, {\"stock_id\": \"2885\", \"stock_name\": \"元大金\", \"action\": \"BUY\", \"weight\": 0.0656}, {\"stock_id\": \"2474\", \"stock_name\": \"可成\", \"action\": \"BUY\", \"weight\": 0.0634}, {\"stock_id\": \"3045\", \"stock_name\": \"台灣大\", \"action\": \"BUY\", \"weight\": 0.0568}, {\"stock_id\": \"2887\", \"stock_name\": \"台新新光金\", \"action\": \"BUY\", \"weight\": 0.0568}, {\"stock_id\": \"4904\", \"stock_name\": \"遠傳\", \"action\": \"BUY\", \"weight\": 0.053}, {\"stock_id\": \"2891\", \"stock_name\": \"中信金\", \"action\": \"BUY\", \"weight\": 0.053}, {\"stock_id\": \"2883\", \"stock_name\": \"凱基金\", \"action\": \"BUY\", \"weight\": 0.053}, {\"stock_id\": \"2882\", \"stock_name\": \"國泰金\", \"action\": \"BUY\", \"weight\": 0.0252}, {\"stock_id\": \"2881\", \"stock_name\": \"富邦金\", \"action\": \"BUY\", \"weight\": 0.0252}, {\"stock_id\": \"2886\", \"stock_name\": \"兆豐金\", \"action\": \"BUY\", \"weight\": 0.0252}, {\"stock_id\": \"5871\", \"stock_name\": \"中租-KY\", \"action\": \"BUY\", \"weight\": 0.0252}, {\"stock_id\": \"2880\", \"stock_name\": \"華南金\", \"action\": \"BUY\", \"weight\": 0.0252}, {\"stock_id\": \"2801\", \"stock_name\": \"彰銀\", \"action\": \"BUY\", \"weight\": 0.0252}, {\"stock_id\": \"2618\", \"stock_name\": \"長榮航\", \"action\": \"BUY\", \"weight\": 0.0252}, {\"stock_id\": \"2610\", \"stock_name\": \"華航\", \"action\": \"BUY\", \"weight\": 0.0252}, {\"stock_id\": \"2603\", \"stock_name\": \"長榮\", \"action\": \"BUY\", \"weight\": 0.0252}, {\"stock_id\": \"2385\", \"stock_name\": \"群光\", \"action\": \"BUY\", \"weight\": 0.0252}, {\"stock_id\": \"2347\", \"stock_name\": \"聯強\", \"action\": \"BUY\", \"weight\": 0.0147}, {\"stock_id\": \"2884\", \"stock_name\": \"玉山金\", \"action\": \"BUY\", \"weight\": 0.0147}, {\"stock_id\": \"2615\", \"stock_name\": \"萬海\", \"action\": \"BUY\", \"weight\": 0.0147}, {\"stock_id\": \"2606\", \"stock_name\": \"裕民\", \"action\": \"BUY\", \"weight\": 0.0147}, {\"stock_id\": \"2912\", \"stock_name\": \"統一超\", \"action\": \"BUY\", \"weight\": 0.0147}, {\"stock_id\": \"2357\", \"stock_name\": \"華碩\", \"act"
+          }
+        }
+      ]
+    },
+    "市場機制": {
+      "select": {
+        "name": "WARNING"
+      }
+    },
+    "健康分數": {
+      "number": 50.4
+    }
+  }
+}

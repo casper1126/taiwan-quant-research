@@ -522,8 +522,14 @@ def _download_taiex(db_path: str, token: str, start: str, force: bool) -> bool:
 
 
 def _download_margin_all(db_path: str, token: str, start: str, force: bool,
-                          sid_filter: Optional[str]) -> None:
-    stock_ids = [sid_filter] if sid_filter else get_stock_list(db_path)
+                          sid_filter: Optional[str],
+                          stock_ids_override: Optional[List[str]] = None) -> None:
+    if sid_filter:
+        stock_ids = [sid_filter]
+    elif stock_ids_override is not None:
+        stock_ids = stock_ids_override
+    else:
+        stock_ids = get_stock_list(db_path)
     if not stock_ids:
         logger.error("❌ load_manifest 為空！請先執行：python run.py --step 1")
         return
@@ -741,7 +747,8 @@ def download_all_supplementary_backfill(db_path: str, token: str, target_start: 
 
 def download_all_supplementary(db_path: str, token: str, start: str = DEFAULT_START,
                                 force: bool = False, sid_filter: Optional[str] = None,
-                                skip_margin: bool = False, skip_index: bool = False) -> None:
+                                skip_margin: bool = False, skip_index: bool = False,
+                                stock_ids: Optional[List[str]] = None) -> None:
     """
     下載 margin_trading（融資融券）與 market_index（TAIEX）。
 
@@ -757,6 +764,10 @@ def download_all_supplementary(db_path: str, token: str, start: str = DEFAULT_ST
     sid_filter  : 只下載指定股票的融資融券（不影響 TAIEX，指數不分股票）
     skip_margin : 跳過融資融券下載
     skip_index  : 跳過 TAIEX 下載
+    stock_ids   : 只下載這份清單裡的股票（Task 8 每日自動化用，例如只更新
+                  策略實際會用到的前 300 檔活躍股，不用每天把全部 2000+ 檔
+                  都跑一輪）。跟 sid_filter 同時給時 sid_filter 優先；都不給
+                  就照舊全部下載。
     """
     with download_lock("download_supplementary.py"):
         init_tables(db_path)
@@ -768,7 +779,8 @@ def download_all_supplementary(db_path: str, token: str, start: str = DEFAULT_ST
                 return
 
         if not skip_margin:
-            _download_margin_all(db_path, token, start, force, sid_filter)
+            _download_margin_all(db_path, token, start, force, sid_filter,
+                                 stock_ids_override=stock_ids)
 
 
 # ══════════════════════════════════════════════════════════════

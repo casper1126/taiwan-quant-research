@@ -1,0 +1,240 @@
+{
+  "date": "2026-08-29",
+  "generated": "2026-08-29T17:39:38.685260",
+  "signals": [
+    {
+      "stock_id": "2412",
+      "stock_name": "中華電",
+      "action": "BUY",
+      "weight": 0.0679
+    },
+    {
+      "stock_id": "2892",
+      "stock_name": "第一金",
+      "action": "BUY",
+      "weight": 0.0656
+    },
+    {
+      "stock_id": "2890",
+      "stock_name": "永豐金",
+      "action": "BUY",
+      "weight": 0.0656
+    },
+    {
+      "stock_id": "2885",
+      "stock_name": "元大金",
+      "action": "BUY",
+      "weight": 0.0656
+    },
+    {
+      "stock_id": "2474",
+      "stock_name": "可成",
+      "action": "BUY",
+      "weight": 0.0634
+    },
+    {
+      "stock_id": "3045",
+      "stock_name": "台灣大",
+      "action": "BUY",
+      "weight": 0.0568
+    },
+    {
+      "stock_id": "2887",
+      "stock_name": "台新新光金",
+      "action": "BUY",
+      "weight": 0.0568
+    },
+    {
+      "stock_id": "4904",
+      "stock_name": "遠傳",
+      "action": "BUY",
+      "weight": 0.053
+    },
+    {
+      "stock_id": "2891",
+      "stock_name": "中信金",
+      "action": "BUY",
+      "weight": 0.053
+    },
+    {
+      "stock_id": "2883",
+      "stock_name": "凱基金",
+      "action": "BUY",
+      "weight": 0.053
+    },
+    {
+      "stock_id": "2882",
+      "stock_name": "國泰金",
+      "action": "BUY",
+      "weight": 0.0252
+    },
+    {
+      "stock_id": "2881",
+      "stock_name": "富邦金",
+      "action": "BUY",
+      "weight": 0.0252
+    },
+    {
+      "stock_id": "2886",
+      "stock_name": "兆豐金",
+      "action": "BUY",
+      "weight": 0.0252
+    },
+    {
+      "stock_id": "5871",
+      "stock_name": "中租-KY",
+      "action": "BUY",
+      "weight": 0.0252
+    },
+    {
+      "stock_id": "2880",
+      "stock_name": "華南金",
+      "action": "BUY",
+      "weight": 0.0252
+    },
+    {
+      "stock_id": "2801",
+      "stock_name": "彰銀",
+      "action": "BUY",
+      "weight": 0.0252
+    },
+    {
+      "stock_id": "2618",
+      "stock_name": "長榮航",
+      "action": "BUY",
+      "weight": 0.0252
+    },
+    {
+      "stock_id": "2610",
+      "stock_name": "華航",
+      "action": "BUY",
+      "weight": 0.0252
+    },
+    {
+      "stock_id": "2603",
+      "stock_name": "長榮",
+      "action": "BUY",
+      "weight": 0.0252
+    },
+    {
+      "stock_id": "2385",
+      "stock_name": "群光",
+      "action": "BUY",
+      "weight": 0.0252
+    },
+    {
+      "stock_id": "2347",
+      "stock_name": "聯強",
+      "action": "BUY",
+      "weight": 0.0147
+    },
+    {
+      "stock_id": "2884",
+      "stock_name": "玉山金",
+      "action": "BUY",
+      "weight": 0.0147
+    },
+    {
+      "stock_id": "2615",
+      "stock_name": "萬海",
+      "action": "BUY",
+      "weight": 0.0147
+    },
+    {
+      "stock_id": "2606",
+      "stock_name": "裕民",
+      "action": "BUY",
+      "weight": 0.0147
+    },
+    {
+      "stock_id": "2912",
+      "stock_name": "統一超",
+      "action": "BUY",
+      "weight": 0.0147
+    },
+    {
+      "stock_id": "2357",
+      "stock_name": "華碩",
+      "action": "BUY",
+      "weight": 0.0147
+    },
+    {
+      "stock_id": "3702",
+      "stock_name": "大聯大",
+      "action": "BUY",
+      "weight": 0.0147
+    },
+    {
+      "stock_id": "2353",
+      "stock_name": "宏碁",
+      "action": "BUY",
+      "weight": 0.0147
+    },
+    {
+      "stock_id": "4938",
+      "stock_name": "和碩",
+      "action": "BUY",
+      "weight": 0.0147
+    },
+    {
+      "stock_id": "2324",
+      "stock_name": "仁寶",
+      "action": "BUY",
+      "weight": 0.0147
+    }
+  ],
+  "stats": {
+    "回測區間": "2015-01-05 ~ 2026-08-28",
+    "總報酬": "129.6%",
+    "年化報酬": "8.0%",
+    "年化波動度": "12.8%",
+    "Sharpe Ratio": "0.51",
+    "最大回撤": "-24.9%",
+    "Calmar Ratio": "0.32",
+    "年化換手率": "255.5%",
+    "signal_basis_date": "2026-08-28",
+    "holdings": 30
+  },
+  "regime": {
+    "date": "2026-08-28",
+    "regime": "WARNING",
+    "health_score": 50.4,
+    "p_bear": 0.3568,
+    "crash_prob": 0.176,
+    "exposure": 0.4,
+    "downgraded": false,
+    "previous_regime": "WARNING"
+  },
+  "factor_decay_alerts": {
+    "momentum": {
+      "recent_ic": 0.1104,
+      "long_term_mean": 0.1227,
+      "decayed": false
+    },
+    "value": {
+      "recent_ic": 0.159,
+      "long_term_mean": 0.0924,
+      "decayed": false
+    },
+    "rev_yoy": {
+      "recent_ic": 0.0734,
+      "long_term_mean": 0.0548,
+      "decayed": false
+    },
+    "low_vol": {
+      "recent_ic": 0.1889,
+      "long_term_mean": 0.1543,
+      "decayed": false
+    },
+    "margin_usage": {
+      "recent_ic": 0.0465,
+      "long_term_mean": 0.0413,
+      "decayed": false
+    },
+    "inst_flow": {
+      "recent_ic": 0.0568,
+      "long_term_mean": 0.0388,
+      "decayed": false
+    }
+  }
+}

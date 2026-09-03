@@ -1,44 +1,42 @@
 """
 daily_update.py
 ─────────────────────────────────────────────────────────────
-每日自動化更新腳本：
+每日自動化更新腳本（Task 8）：
 
-1. 從 FinMind 抓取今日最新資料（增量，只抓尚未存入的日期）
-2. 執行因子計算，產生今日持倉訊號
-3. 把訊號存成 signals/YYYY-MM-DD.json
-4. 發送 LINE + Notion 通知
+1. 增量更新四個資料集：價格/估值、三大法人、融資融券、TAIEX
+2. 跑一次機制偵測（regime/regime_engine.py），算出今天的機制狀態、
+   健康分數，並偵測是否比昨天降級
+3. 跑一次因子衰退監控（regime/decay_monitor.py），附上最新的衰退警示
+4. 用 strategy/quant_layer2.py 的正式回測引擎算今天的建議持倉
+   （不是自己手刻一份公式——2026-08-23 以前這裡曾經有一份獨立的因子
+   計算邏輯，含 bug，已經停用；現在改成呼叫跟 Task 2-7 共用的同一套
+   `run_pipeline()`，維持整個專案「因子定義只有一個事實來源」的原則）
+5. 把訊號存成 signals/YYYY-MM-DD.json
+6. 發送 LINE + Notion 通知（機制降級時額外發警示）；沒有設定 token
+   時自動切換成 dry-run（組好內容印到 log，並存檔到 signals/）
 
-由 GitHub Actions 在每個交易日 14:30 自動觸發，
-也可以在本機手動執行：
-    python daily_update.py
+由 GitHub Actions 在每個交易日 14:30 自動觸發，也可以在本機手動執行：
+    python automation/daily_update.py
 """
 
-import os
 import json
+import os
+import sys
 import time
-import sqlite3
-import requests
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import pandas as pd
-from pandas.tseries.offsets import DateOffset
+import requests
+import sqlite3
 from loguru import logger
 
 # ── 設定 Python 路徑 ──────────────────────────────────────────
-import sys
-sys.path.insert(0, str(Path(__file__).parent / ".."))  # 加入 Quant_Trading_System 根目錄
-sys.path.insert(0, str(Path(__file__).parent.parent / "data_pipeline"))
-
-# ── 引入同資料夾和 data_pipeline 的模組 ──────────────────────
-from data_pipeline.loader import CSVLoader
-from data_pipeline.download_institutional import download_all as download_institutional_all
-
-# ── 設定 ──────────────────────────────────────────────────────
-# 使用絕對路徑以避免相對路徑問題（無論從哪個目錄執行都能找到）
-BASE_DIR       = Path(__file__).parent.parent  # 項目根目錄
+BASE_DIR = Path(__file__).parent.parent  # 專案根目錄
+sys.path.insert(0, str(BASE_DIR))
+sys.path.insert(0, str(BASE_DIR / "data_pipeline"))
+sys.path.insert(0, str(BASE_DIR / "strategy"))
 
 # 自動讀 .env（讓 token 不用手動 export）
 try:
@@ -47,445 +45,618 @@ try:
 except ImportError:
     pass
 
-DB_PATH        = str(BASE_DIR / "data" / "taiwan_stock.db")
-SIGNALS_DIR    = BASE_DIR / "signals"
-FINMIND_URL    = "https://api.finmindtrade.com/api/v4/data"
-FINMIND_TOKEN  = os.getenv("FINMIND_TOKEN", "")
+from data_pipeline.loader import CSVLoader
+from data_pipeline.download_lock import download_lock
+from data_pipeline.finmind_common import QuotaExhaustedError, MAX_QUOTA_RETRY_CYCLES, sleep_with_heartbeat
+from data_pipeline.download_institutional import (
+    download_all as download_institutional_all,
+    get_top_n_universe,
+)
+from data_pipeline.download_supplementary import download_all_supplementary
 
-# 策略參數（與 quant_layer2.py 保持一致）
-LOOKBACK   = 120
-TOP_N      = 10
-REBAL_FREQ = 20
-BIAS_CAP   = 0.10
-RF_RATE    = 0.015
+import quant_layer2 as q
+from regime.regime_engine import run_regime_engine, STATE_RANK
+from regime.decay_monitor import run_decay_monitor
+
+import notifier
+
+# ── 設定 ──────────────────────────────────────────────────────
+DB_PATH       = str(BASE_DIR / "data" / "taiwan_stock.db")
+SIGNALS_DIR   = BASE_DIR / "signals"
+FINMIND_URL   = "https://api.finmindtrade.com/api/v4/data"
+FINMIND_TOKEN = os.getenv("FINMIND_TOKEN", "").strip()
+
+PER_CALL_SLEEP = 0.5      # 秒/次（跟 download_supplementary.py 同一套固定節奏）
+HOURLY_LIMIT   = 550
+WINDOW_SECONDS = 3600
+
+# 2026-08-23 決定（見 docs/DECISIONS.md「Task 8」那筆）：每日增量更新只
+# 更新「過去 365 天平均成交金額」前 N 檔活躍股，不是全部 2056 檔。
+#
+# 原因：全部 2056 檔股票 × 價格/估值兩個資料集，即使每天只增量抓 1 天，
+# 也是 2056×2≈4112 次 API 呼叫，在 550 次/小時的額度下光是這一步就要
+# 7+ 小時，完全不適合每天 14:30 觸發、還要接著跑機制偵測+回測+通知的
+# 自動化排程。策略本身選股時也只會用流動性篩選（liquid_mask）留下的
+# 活躍股，非活躍股從來就不會被選中——限制在前 300 檔不會漏掉任何策略
+# 真正可能買的股票，只是讓「每天要不要更新」這件事跟「策略用不用得到」
+# 這件事對齊。完整 2056 檔的歷史資料庫（回測研究用）不受影響，只有
+# daily_update.py 這支「每日」腳本的更新範圍縮小，Task 1-7 累積的
+# 全量歷史資料不會因為每天執行這支腳本而變得只剩前 300 檔。
+DAILY_UNIVERSE_TOP_N = 300
 
 SIGNALS_DIR.mkdir(exist_ok=True)
 
 
 # ══════════════════════════════════════════════════════════════
-# PART 1  增量資料更新
+# PART 1a  價格／估值增量更新（含 402 判定 + 休眠自動恢復）
 # ══════════════════════════════════════════════════════════════
+#
+# 2026-08-23 重寫：原本這裡的 `_finmind_get()` 沒有處理 HTTP 402，跟
+# Task 1 事故發生前的 download_supplementary.py／download_institutional.py
+# 是同一種 bug（配額用盡被靜默吞成「沒資料」）。這裡直接套用已經修好、
+# 驗證過的模式（finmind_common.QuotaExhaustedError + 休眠到下個整點
+# 自動恢復 + download_lock 互斥鎖），不重新發明一份不同步的邏輯。
 
-def _finmind_get(dataset: str, stock_id: str,
-                 start_date: str, end_date: str,
+class RateLimiter:
+    """跟 download_supplementary.py 同一種固定節奏限速器。"""
+
+    def __init__(self, per_call_sleep: float = PER_CALL_SLEEP,
+                 limit: int = HOURLY_LIMIT, window_seconds: int = WINDOW_SECONDS):
+        self.per_call_sleep = per_call_sleep
+        self.limit = limit
+        self.window_seconds = window_seconds
+        self.call_count = 0
+        self.window_start = self._current_window()
+
+    def _current_window(self) -> float:
+        now = time.time()
+        return now - (now % self.window_seconds)
+
+    def next_window_start(self) -> float:
+        return self.window_start + self.window_seconds
+
+    def reset_window(self) -> None:
+        self.window_start = self._current_window()
+        self.call_count = 0
+
+    def acquire(self) -> None:
+        now = time.time()
+        if now - self.window_start >= self.window_seconds:
+            self.reset_window()
+        if self.call_count >= self.limit:
+            wait = self.next_window_start() - time.time()
+            if wait > 0:
+                logger.warning(f"⚠️  本時間窗口已呼叫 {self.call_count} 次，主動休眠 {wait:.0f} 秒...")
+                time.sleep(wait + 0.5)
+            self.reset_window()
+        time.sleep(self.per_call_sleep)
+        self.call_count += 1
+
+
+_rate_limiter = RateLimiter()
+
+
+def _hibernate(processed: int, total: int, cycle: int) -> None:
+    wake_at = datetime.fromtimestamp(_rate_limiter.next_window_start()) + timedelta(seconds=5)
+    logger.warning(
+        f"⏸️  額度耗盡於 {datetime.now():%H:%M:%S}，已處理 {processed}/{total} 檔，"
+        f"將於 {wake_at:%H:%M:%S} 自動恢復（第 {cycle}/{MAX_QUOTA_RETRY_CYCLES} 次）"
+    )
+    sleep_with_heartbeat(wake_at, processed, total)
+    _rate_limiter.reset_window()
+    logger.info(f"▶️  已恢復，從第 {processed + 1} 檔繼續")
+
+
+def _finmind_get(dataset: str, stock_id: str, start_date: str, end_date: str,
                  retries: int = 3) -> pd.DataFrame:
-    """FinMind API 單次呼叫（含重試）"""
+    """
+    FinMind 單次呼叫。402 判定必須在 `resp.raise_for_status()` 之前，
+    否則會被 generic HTTPError 分支接住、重試幾次後放棄，被上層誤判成
+    「沒有資料」（Task 1 402 事故的根因，見 docs/PROJECT_STATUS.md §5）。
+    """
     params = {
-        "dataset":    dataset,
-        "data_id":    stock_id,
-        "start_date": start_date,
-        "end_date":   end_date,
-        "token":      FINMIND_TOKEN,
+        "dataset": dataset, "data_id": stock_id,
+        "start_date": start_date, "end_date": end_date, "token": FINMIND_TOKEN,
     }
     for attempt in range(1, retries + 1):
+        _rate_limiter.acquire()
         try:
             resp = requests.get(FINMIND_URL, params=params, timeout=30)
-            data = resp.json()
-            if data.get("status") == 200 and data.get("data"):
-                return pd.DataFrame(data["data"])
+            if resp.status_code == 402:
+                raise QuotaExhaustedError(stock_id)
+            resp.raise_for_status()
+            payload = resp.json()
+            if payload.get("status") == 402:
+                raise QuotaExhaustedError(stock_id)
+            if payload.get("status") == 200:
+                return pd.DataFrame(payload.get("data") or [])
             return pd.DataFrame()
+        except QuotaExhaustedError:
+            raise
         except requests.exceptions.Timeout:
-            logger.warning(f"  Timeout（第 {attempt}/{retries} 次），重試...")
-            time.sleep(5 * attempt)
+            logger.warning(f"  [{stock_id}] Timeout（attempt {attempt}/{retries}），重試...")
+            time.sleep(2 ** attempt)
+        except requests.exceptions.HTTPError as e:
+            logger.warning(f"  [{stock_id}] HTTP 錯誤（{e.response.status_code}），重試...")
+            time.sleep(2 ** attempt)
         except Exception as e:
-            logger.error(f"  API 錯誤：{e}")
+            logger.error(f"  [{stock_id}] 異常：{type(e).__name__}: {e}")
             return pd.DataFrame()
+    logger.warning(f"  [{stock_id}] 最終失敗（{retries} 次重試後）")
     return pd.DataFrame()
 
 
-def get_last_price_date(conn: sqlite3.Connection) -> str:
-    """查詢 DB 裡最新的日期，決定增量起始點"""
-    row = conn.execute(
-        "SELECT MAX(date) FROM daily_price"
-    ).fetchone()
+def _get_last_date(conn: sqlite3.Connection, table: str, sid: str,
+                   default: str = "2010-01-01") -> str:
+    """
+    每支股票、每張表各自獨立的 checkpoint（不是全域最大日期）。
+
+    2026-08-23 修正：原本用一個「全部股票共用」的全域 start_date（查
+    `daily_price` 整張表的 MAX(date)），只要有任何一檔股票已經追上最新
+    日期，這個全域值就會前進，導致還沒處理到的股票、或者 daily_price
+    寫成功但 daily_valuation 因為配額用盡沒寫成功的那一小段區間，
+    在「下一次」執行時被這個已經前進的全域 start_date 蓋過去、永遠
+    抓不回來（誤判成「已經是最新」）。改成跟 download_institutional.py／
+    download_supplementary.py 一樣的每股票、每表獨立 checkpoint，才不會
+    有這個缺口。
+    """
+    row = conn.execute(f"SELECT MAX(date) FROM {table} WHERE stock_id = ?", (sid,)).fetchone()
     if row and row[0]:
-        # 從最新日期的下一天開始抓
         last = datetime.strptime(row[0], "%Y-%m-%d")
         return (last + timedelta(days=1)).strftime("%Y-%m-%d")
-    return "2010-01-01"
+    return default
 
 
-def incremental_update():
+def _upsert_one_price_valuation(loader: CSVLoader, conn: sqlite3.Connection,
+                                sid: str, today: str) -> str:
     """
-    增量更新：只抓資料庫還沒有的新資料。
+    抓單一股票的價格＋估值並寫入，回傳 status：
+    "ok" / "no_data" / "quota_exhausted"
 
-    流程：
-    1. 查詢 DB 最新日期
-    2. 從 FinMind 抓 [最新日期+1, 今天] 的資料
-    3. 清洗後寫入 DB
+    價格／估值各自用自己的 checkpoint（見 `_get_last_date`），不是共用
+    同一個 start_date——兩張表可能因為之前某次配額用盡而進度不同步，
+    各自抓各自缺的區間才不會有一邊永遠補不回來的缺口。
 
-    注意：只更新 daily_price 和 daily_valuation，
-    月營收（monthly_revenue）會在月初有新資料時才更新。
+    用 INSERT OR REPLACE（不是 pandas to_sql(if_exists="append")）：
+    daily_price／daily_valuation 都用 (date, stock_id) 當 PRIMARY KEY，
+    append 模式在同一個區間重複執行（例如 402 休眠恢復後重跑同一個
+    stock）會直接撞 UNIQUE constraint 拋例外，把「應該要能安全重試」的
+    正常流程誤判成失敗、跳過該股票、留下真正的資料缺口。改用
+    INSERT OR REPLACE，跟專案裡其他下載器（download_institutional.py／
+    download_supplementary.py）一致，任何時候重跑同一段區間都是安全的。
     """
-    today     = date.today().strftime("%Y-%m-%d")
-    conn_path = DB_PATH
+    price_start = _get_last_date(conn, "daily_price", sid)
+    val_start = _get_last_date(conn, "daily_valuation", sid)
 
-    if not Path(conn_path).exists():
-        logger.error(f"資料庫不存在：{conn_path}")
-        logger.error("請先在本機跑完 python run.py --step 1，再 push DB 或設定 cache")
-        return False
+    df_price = pd.DataFrame() if price_start > today else \
+        _finmind_get("TaiwanStockPrice", sid, price_start, today)
+    df_val = pd.DataFrame() if val_start > today else \
+        _finmind_get("TaiwanStockPER", sid, val_start, today)
 
-    conn = sqlite3.connect(conn_path)
-    start_date = get_last_price_date(conn)
+    wrote_any = False
 
-    if start_date > today:
-        logger.info(f"資料已是最新（{today}），無需更新")
-        conn.close()
+    if not df_price.empty:
+        df_price = df_price.rename(columns={"max": "high", "min": "low", "Trading_Volume": "volume"})
+        df_price["date"] = pd.to_datetime(df_price["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        df_price["close"] = pd.to_numeric(df_price.get("close"), errors="coerce")
+        df_price = df_price[df_price["close"] > 0]
+        df_price = df_price.dropna(subset=["date", "close"])
+        if not df_price.empty:
+            df_price["open"] = pd.to_numeric(df_price.get("open"), errors="coerce")
+            df_price["high"] = pd.to_numeric(df_price.get("high"), errors="coerce")
+            df_price["low"] = pd.to_numeric(df_price.get("low"), errors="coerce")
+            df_price["volume"] = pd.to_numeric(df_price.get("volume"), errors="coerce").fillna(0)
+            df_price["stock_id"] = sid
+            rows = df_price[["date", "stock_id", "open", "high", "low", "close", "volume"]].values.tolist()
+            with loader._conn() as c:
+                c.executemany(
+                    "INSERT OR REPLACE INTO daily_price "
+                    "(date, stock_id, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
+            wrote_any = True
+
+    if not df_val.empty:
+        df_val["date"] = pd.to_datetime(df_val["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        df_val["PER"] = pd.to_numeric(df_val.get("PER"), errors="coerce")
+        df_val.loc[df_val["PER"] == 0, "PER"] = float("nan")
+        df_val["PBR"] = pd.to_numeric(df_val.get("PBR"), errors="coerce")
+        df_val["dividend_yield"] = pd.to_numeric(df_val.get("dividend_yield"), errors="coerce")
+        df_val = df_val.dropna(subset=["date"])
+        if not df_val.empty:
+            df_val["stock_id"] = sid
+            rows = df_val[["date", "stock_id", "dividend_yield", "PER", "PBR"]].values.tolist()
+            with loader._conn() as c:
+                c.executemany(
+                    "INSERT OR REPLACE INTO daily_valuation "
+                    "(date, stock_id, dividend_yield, PER, PBR) VALUES (?, ?, ?, ?, ?)",
+                    rows,
+                )
+            wrote_any = True
+
+    return "ok" if wrote_any else "no_data"
+
+
+def incremental_price_valuation(sid_filter: Optional[str] = None,
+                                stock_ids: Optional[List[str]] = None) -> bool:
+    """
+    增量更新 daily_price／daily_valuation。全程持有 download_lock（跟
+    institutional／supplementary 共用同一把鎖檔，不同時段各自取得，
+    不會巢狀重入——同一時間只有一個階段在打 FinMind）。
+
+    stock_ids 不給時預設更新「全部」DB 裡已知的股票——只有
+    run_daily_update() 的正常每日流程會主動傳入 DAILY_UNIVERSE_TOP_N
+    活躍股清單，其他呼叫端（測試、未來要跑全量的場景）維持原本「不給
+    就全部更新」的行為，不會因為這次改動而意外縮小範圍。
+    """
+    today = date.today().strftime("%Y-%m-%d")
+
+    with download_lock("daily_update.py:price_valuation"):
+        if not Path(DB_PATH).exists():
+            logger.error(f"資料庫不存在：{DB_PATH}")
+            return False
+
+        conn = sqlite3.connect(DB_PATH)
+        if sid_filter:
+            resolved_ids = [sid_filter]
+        elif stock_ids is not None:
+            resolved_ids = stock_ids
+        else:
+            resolved_ids = [
+                r[0] for r in conn.execute("SELECT DISTINCT stock_id FROM daily_price").fetchall()
+            ]
+        stock_ids = resolved_ids
+
+        if not stock_ids:
+            conn.close()
+            logger.error("DB 裡沒有股票，請先跑完 python run.py --step 1")
+            return False
+
+        logger.info(f"📥 增量更新價格／估值：{len(stock_ids)} 檔，每股票各自 checkpoint 續抓到 {today}")
+        loader = CSVLoader(DB_PATH)
+
+        success, fail, skip = 0, 0, 0
+        quota_cycle = 0
+        i = 0
+        last_heartbeat = time.time()
+
+        try:
+            while i < len(stock_ids):
+                sid = stock_ids[i]
+                try:
+                    status = _upsert_one_price_valuation(loader, conn, sid, today)
+                    if status == "ok":
+                        success += 1
+                    elif status == "no_data":
+                        skip += 1
+                except QuotaExhaustedError:
+                    quota_cycle += 1
+                    if quota_cycle > MAX_QUOTA_RETRY_CYCLES:
+                        logger.error(
+                            f"❌ 已嘗試 {MAX_QUOTA_RETRY_CYCLES} 個時間窗口仍配額不足，"
+                            f"已處理 {i}/{len(stock_ids)} 檔（成功 {success}）。"
+                            f"重新執行同一指令可從 checkpoint 續跑。"
+                        )
+                        return False
+                    _hibernate(i, len(stock_ids), quota_cycle)
+                    continue
+                except Exception as e:
+                    fail += 1
+                    logger.warning(f"  [{sid}] ✗ 異常：{e}")
+
+                quota_cycle = 0
+                i += 1
+                if (i) % 100 == 0:
+                    logger.info(f"  進度 {i}/{len(stock_ids)} ✓{success} ⊘{skip} ✗{fail}")
+                if time.time() - last_heartbeat > 600:
+                    logger.info(f"💓 心跳：{i}/{len(stock_ids)} 檔，✓{success} ⊘{skip} ✗{fail}")
+                    last_heartbeat = time.time()
+        finally:
+            conn.close()
+
+        logger.info(f"✅ 價格／估值增量更新完成：成功 {success}／跳過(無資料) {skip}／失敗 {fail}")
         return True
 
-    logger.info(f"增量更新範圍：{start_date} ~ {today}")
 
-    # 取得所有股票代號
-    stock_ids = [
-        r[0] for r in conn.execute(
-            "SELECT DISTINCT stock_id FROM daily_price"
-        ).fetchall()
-    ]
-    conn.close()
+# ══════════════════════════════════════════════════════════════
+# PART 1b  三大法人增量更新（既有邏輯，已經有完整的休眠/恢復機制）
+# ══════════════════════════════════════════════════════════════
 
-    if not stock_ids:
-        logger.error("DB 裡沒有股票，請先跑完 Step 1")
+def incremental_institutional_update(top_n: Optional[int] = None,
+                                     sid_filter: Optional[str] = None) -> bool:
+    if not FINMIND_TOKEN:
+        logger.warning("未設定 FINMIND_TOKEN，跳過三大法人資料下載")
+        return False
+    try:
+        logger.info(f"📊 增量下載三大法人資料（sid={sid_filter}, top_n={top_n}）...")
+        download_institutional_all(db_path=DB_PATH, token=FINMIND_TOKEN, force=False,
+                                   workers=1, top_n=top_n, sid_filter=sid_filter)
+        logger.info("✅ 三大法人資料更新完成")
+        return True
+    except SystemExit:
+        # download_lock 偵測到有其他 process 在跑會 sys.exit(1)，daily_update.py
+        # 不應該整支腳本跟著被殺掉——記錄下來，當作這個步驟今天沒跑成，繼續後面流程。
+        logger.warning("⚠️  三大法人下載未取得鎖（可能有其他下載程序在跑），今天跳過此步驟")
+        return False
+    except Exception as e:
+        logger.warning(f"三大法人資料下載失敗：{e}（非致命，繼續執行）")
         return False
 
-    logger.info(f"更新 {len(stock_ids)} 檔股票...")
 
-    # 使用 CSVLoader 的 DB 連線方式寫入
-    loader = CSVLoader(DB_PATH)
+# ══════════════════════════════════════════════════════════════
+# PART 1c  融資融券 + TAIEX 增量更新（Task 8 新增，重用 Task 1 的下載器）
+# ══════════════════════════════════════════════════════════════
 
-    success = 0
-    fail    = 0
-
-    for i, sid in enumerate(stock_ids):
-        try:
-            # 日頻價格
-            df_price = _finmind_get("TaiwanStockPrice", sid, start_date, today)
-            if not df_price.empty:
-                df_price["date"] = pd.to_datetime(df_price["date"])
-                df_price = df_price.rename(columns={
-                    "max": "high", "min": "low",
-                    "Trading_Volume": "volume",
-                })
-                # 過濾掉 close=0 的停牌日
-                df_price = df_price[df_price.get("close", pd.Series([1])) > 0]
-                if not df_price.empty:
-                    with loader._conn() as c:
-                        df_out = df_price[["date","open","high","low","close","volume"]].copy()
-                        df_out["date"]     = df_out["date"].dt.strftime("%Y-%m-%d")
-                        df_out["stock_id"] = sid
-                        df_out.to_sql("daily_price", c, if_exists="append",
-                                      index=False, method="multi")
-
-            # 日頻估值
-            df_val = _finmind_get("TaiwanStockPER", sid, start_date, today)
-            if not df_val.empty:
-                df_val["date"] = pd.to_datetime(df_val["date"])
-                df_val["PER"]  = pd.to_numeric(df_val["PER"],  errors="coerce")
-                df_val.loc[df_val["PER"] == 0, "PER"] = float("nan")
-                with loader._conn() as c:
-                    df_out = df_val[["date","dividend_yield","PER","PBR"]].copy()
-                    df_out["date"]     = df_out["date"].dt.strftime("%Y-%m-%d")
-                    df_out["stock_id"] = sid
-                    df_out.to_sql("daily_valuation", c, if_exists="append",
-                                  index=False, method="multi")
-
-            success += 1
-
-            # 每 50 檔顯示進度
-            if (i + 1) % 50 == 0:
-                logger.info(f"  進度 {i+1}/{len(stock_ids)}...")
-
-            time.sleep(0.3)   # 速率控制
-
-        except Exception as e:
-            logger.warning(f"  {sid} 更新失敗：{e}")
-            fail += 1
-
-    logger.info(f"增量更新完成：成功 {success}，失敗 {fail}")
-    return True
-
-
-def incremental_institutional_update():
+def incremental_margin_and_index(stock_ids: Optional[List[str]] = None) -> bool:
     """
-    增量下載籌碼資料（三大法人）。
-
-    利用已建立的檢查點機制，只抓 DB 還沒有的新日期資料。
-    自動應用 RateLimiter 確保不超過 FinMind 的 600 次/小時配額。
+    直接呼叫 download_supplementary.py 既有的增量入口（不帶 --backfill-to
+    就是預設的增量模式：從各自 checkpoint 續抓到今天），不重新實作一份
+    邏輯——這支下載器已經有完整的鎖檔+402 休眠恢復機制（Task 1 事故修復）。
     """
     if not FINMIND_TOKEN:
-        logger.warning("未設定 FINMIND_TOKEN，跳過籌碼資料下載")
+        logger.warning("未設定 FINMIND_TOKEN，跳過融資融券／TAIEX 下載")
+        return False
+    try:
+        logger.info(f"📈 增量下載融資融券／TAIEX 資料（{len(stock_ids) if stock_ids else '全部'} 檔）...")
+        download_all_supplementary(db_path=DB_PATH, token=FINMIND_TOKEN, force=False,
+                                   stock_ids=stock_ids)
+        logger.info("✅ 融資融券／TAIEX 更新完成")
+        return True
+    except SystemExit:
+        logger.warning("⚠️  融資融券／TAIEX 下載未取得鎖（可能有其他下載程序在跑），今天跳過此步驟")
+        return False
+    except Exception as e:
+        logger.warning(f"融資融券／TAIEX 下載失敗：{e}（非致命，繼續執行）")
         return False
 
-    try:
-        logger.info("  開始增量下載籌碼資料...")
-        download_institutional_all(
-            db_path=DB_PATH,
-            token=FINMIND_TOKEN,
-            force=False,  # 增量模式：只抓新日期
-            workers=1,     # 日間更新用 1 worker 即可（夜間可改 4）
-        )
-        logger.info("  籌碼資料更新完成")
-        return True
-    except Exception as e:
-        logger.warning(f"  籌碼資料下載失敗：{e}（非致命，繼續執行）")
-        return True  # 不中止流程
-
 
 # ══════════════════════════════════════════════════════════════
-# PART 2  產生今日訊號
+# PART 2  機制訊號（Task 3 的 regime_engine，跟 quant_layer2.py 是被動接受
+#          關係——regime/ 不 import quant_layer2.py，見 docs/PROJECT_STATUS.md）
 # ══════════════════════════════════════════════════════════════
 
-def load_matrices_for_signal(db_path: str,
-                              start: str = "2018-01-01") -> dict:
-    """從 DB 讀取計算訊號所需的矩陣"""
-    conn = sqlite3.connect(db_path)
-    end  = date.today().strftime("%Y-%m-%d")
+def compute_regime_signal() -> Tuple[Dict, pd.DataFrame]:
+    """
+    跑一次完整的機制偵測，取最新一天當作「今天的機制」。
 
-    price_df = pd.read_sql(
-        "SELECT date,stock_id,close FROM daily_price "
-        "WHERE date BETWEEN ? AND ? ORDER BY date",
-        conn, params=(start, end), parse_dates=["date"],
-    )
-    val_df = pd.read_sql(
-        "SELECT date,stock_id,PER,PBR FROM daily_valuation "
-        "WHERE date BETWEEN ? AND ? ORDER BY date",
-        conn, params=(start, end), parse_dates=["date"],
-    )
-    rev_df = pd.read_sql(
-        "SELECT date,stock_id,revenue FROM monthly_revenue ORDER BY date",
-        conn, parse_dates=["date"],
-    )
-    conn.close()
+    回傳 (regime_info, regime_df)：
+      regime_info：{"date","regime","health_score","p_bear","crash_prob",
+                    "exposure","downgraded","previous_regime"}
+      regime_df  ：完整結果（目前 Task 8 不需要拿它去接 quant_layer2 的
+                    機制模式，只是保留完整輸出以防之後要用）
+    """
+    logger.info("🧭 計算今日機制訊號...")
+    regime_df, _ = run_regime_engine(db_path=DB_PATH)
+    valid = regime_df.dropna(subset=["regime"])
+    if valid.empty:
+        logger.warning("機制偵測沒有任何有效輸出（資料不足），regime 訊號留空")
+        return {
+            "date": None, "regime": None, "health_score": None,
+            "p_bear": None, "crash_prob": None, "exposure": None,
+            "downgraded": False, "previous_regime": None,
+        }, regime_df
 
-    def wide(df, col):
-        return df.pivot(index="date", columns="stock_id", values=col)
+    latest = valid.iloc[-1]
+    latest_date = valid.index[-1]
 
-    return {
-        "close":   wide(price_df, "close"),
-        "PER":     wide(val_df,   "PER"),
-        "PBR":     wide(val_df,   "PBR"),
-        "revenue": wide(rev_df,   "revenue"),
+    downgraded = False
+    previous_regime = None
+    if len(valid) >= 2:
+        prev = valid.iloc[-2]
+        previous_regime = prev["regime"]
+        if STATE_RANK.get(latest["regime"], -1) < STATE_RANK.get(prev["regime"], -1):
+            downgraded = True
+
+    def _safe_round(x, n=4):
+        return None if pd.isna(x) else round(float(x), n)
+
+    info = {
+        "date": latest_date.strftime("%Y-%m-%d"),
+        "regime": latest["regime"],
+        "health_score": _safe_round(latest["health"], 1),
+        "p_bear": _safe_round(latest["p_bear"]),
+        "crash_prob": _safe_round(latest["crash_prob"]),
+        "exposure": _safe_round(latest["exposure"], 2),
+        "downgraded": bool(downgraded),
+        "previous_regime": previous_regime,
     }
-
-
-def generate_signals(data: dict) -> tuple:
-    """
-    計算今日因子並產生持倉訊號。
-
-    Returns
-    -------
-    signals : list of dict，每檔股票的動作和理由
-    stats   : dict，策略的最新績效指標
-    """
-    close   = data["close"].replace(0.0, np.nan)
-    PER     = data["PER"]
-    rev_raw = data["revenue"]
-
-    # ── 因子計算 ──────────────────────────────────────────────
-    momentum = close.pct_change(LOOKBACK)
-
-    # Revenue YoY（延遲 40 天）
-    monthly_yoy = rev_raw.sort_index().pct_change(12)
-    monthly_yoy.index = monthly_yoy.index + DateOffset(days=40)
-    rev_yoy = monthly_yoy.reindex(close.index, method="ffill")
-
-    # 乖離率
-    bias = (close - close.rolling(20).mean()) / close.rolling(20).mean()
-
-    # 大盤擇時
-    proxy = close.median(axis=1).ffill()
-    score = pd.Series(0.0, index=proxy.index)
-    for w in [10, 30, 60, 120]:
-        score += (proxy > proxy.rolling(w).mean()).astype(float)
-    market_score = (score / 4.0).iloc[-1]
-
-    # ── 今日橫截面篩選 + 排名 ─────────────────────────────────
-    today_mom  = momentum.iloc[-1]
-    today_per  = PER.iloc[-1]
-    today_yoy  = rev_yoy.iloc[-1]
-    today_bias = bias.iloc[-1]
-
-    valid = (
-        (today_per > 0)
-        & (today_yoy >= 0)
-        & (today_bias < BIAS_CAP)
-        & (today_mom > 0)
+    logger.info(
+        f"  機制：{info['regime']}（健康分數 {info['health_score']}，"
+        f"曝險建議 {info['exposure']}）{'⚠️ 較昨天降級' if downgraded else ''}"
     )
+    return info, regime_df
 
-    masked = today_mom.where(valid, np.nan)
-    rank   = masked.rank(ascending=False)
-    top    = set(rank[rank <= TOP_N].index.tolist())
 
-    # ── 與前一期持倉比較（判斷 BUY / SELL / HOLD）────────────
-    prev_signals_file = _get_prev_signals_file()
-    prev_holdings = set()
-    if prev_signals_file:
-        try:
-            with open(prev_signals_file) as f:
-                prev_data = json.load(f)
-            prev_holdings = {
-                s["stock_id"] for s in prev_data.get("signals", [])
-                if s.get("action") in ("BUY", "HOLD")
-            }
-        except Exception:
-            pass
-
-    weight = 1.0 / TOP_N * market_score   # 大盤擇時調整後的部位
-
-    signals = []
-    for sid in sorted(top):
-        action = "BUY" if sid not in prev_holdings else "HOLD"
-        signals.append({
-            "stock_id": sid,
-            "action":   action,
-            "weight":   round(float(weight), 4),
-            "rank":     int(rank[sid]),
-            "momentum": round(float(today_mom[sid]), 4),
-            "PER":      round(float(today_per[sid]), 2) if not pd.isna(today_per[sid]) else None,
-            "rev_yoy":  round(float(today_yoy[sid]), 4) if not pd.isna(today_yoy[sid]) else None,
-        })
-
-    # 賣出訊號：上期持有但今期不在 top
-    for sid in prev_holdings - top:
-        signals.append({"stock_id": sid, "action": "SELL", "weight": 0.0})
-
-    signals.sort(key=lambda x: (x["action"] != "BUY",
-                                  x["action"] != "HOLD",
-                                  x.get("rank", 99)))
-
-    # ── 簡易績效計算（近 252 天）─────────────────────────────
-    # --- attach stock names (if available) ---
+def compute_factor_decay_alerts(today: str) -> Dict:
+    """跑 Task 7b 的因子衰退監控，回傳可以直接塞進 signals JSON 的字典。"""
+    logger.info("📉 計算因子衰退警示...")
     try:
-        conn = sqlite3.connect(DB_PATH)
-        rows = conn.execute("SELECT stock_id, stock_name FROM load_manifest").fetchall()
-        conn.close()
-        name_map = {r[0]: r[1] for r in rows}
-    except Exception:
-        name_map = {}
-
-    for s in signals:
-        s["stock_name"] = name_map.get(s["stock_id"], "")
-
-    # --- compute stats: prefer portfolio-based stats when we have holdings ---
-    holds = [s for s in signals if s.get("action") in ("BUY", "HOLD")]
-    if holds:
-        hold_ids = [s["stock_id"] for s in holds]
-        stats = _compute_portfolio_stats(close, hold_ids)
-    else:
-        stats = _compute_recent_stats(close)
-
-    stats["market_score"] = f"{market_score:.2f}"
-    stats["holdings"] = len(holds)
-
-    logger.info(f"  今日持倉：{len(holds)} 檔，大盤分數：{market_score:.2f}")
-    return signals, stats
+        result = run_decay_monitor(db_path=DB_PATH, end=today)
+        return result["alerts"]
+    except Exception as e:
+        logger.warning(f"因子衰退監控失敗：{e}（非致命，signals 裡這欄留空）")
+        return {}
 
 
-def _get_prev_signals_file() -> Optional[str]:
-    """找到最近一次的訊號檔案"""
-    files = sorted(SIGNALS_DIR.glob("*.json"), reverse=True)
-    today_file = SIGNALS_DIR / f"{date.today()}.json"
+# ══════════════════════════════════════════════════════════════
+# PART 3  個股訊號（改呼叫 quant_layer2.py 的正式引擎，不再手刻公式）
+# ══════════════════════════════════════════════════════════════
+
+def _get_prev_signals_file(today: str) -> Optional[Path]:
+    files = sorted(SIGNALS_DIR.glob("????-??-??.json"), reverse=True)
+    today_file = SIGNALS_DIR / f"{today}.json"
     for f in files:
         if f != today_file:
-            return str(f)
+            return f
     return None
 
 
-def _compute_recent_stats(close: pd.DataFrame,
-                           lookback_days: int = 252) -> dict:
-    """計算最近一年的策略績效（用等權持倉簡化計算）"""
+def _load_prev_holdings(today: str) -> set:
+    prev_file = _get_prev_signals_file(today)
+    if not prev_file:
+        return set()
     try:
-        recent = close.iloc[-lookback_days:]
-        eq = recent.mean(axis=1).pct_change().dropna()
-
-        total   = (1 + eq).prod() - 1
-        ann_ret = (1 + total) ** (252 / max(len(eq), 1)) - 1
-        ann_vol = eq.std() * np.sqrt(252)
-        sharpe  = (ann_ret - RF_RATE) / ann_vol if ann_vol > 0 else 0
-        mdd     = ((1 + eq).cumprod() / (1 + eq).cumprod().cummax() - 1).min()
-
-        return {
-            "annual_return": f"{ann_ret*100:.1f}%",
-            "max_drawdown":  f"{mdd*100:.1f}%",
-            "sharpe":        f"{sharpe:.2f}",
-        }
+        with open(prev_file, encoding="utf-8") as f:
+            prev = json.load(f)
+        return {s["stock_id"] for s in prev.get("signals", [])
+                if s.get("action") in ("BUY", "HOLD")}
     except Exception:
-        return {"annual_return": "N/A", "max_drawdown": "N/A", "sharpe": "N/A"}
+        return set()
 
 
-def _compute_portfolio_stats(close: pd.DataFrame,
-                             holdings: list,
-                             lookback_days: int = 252) -> dict:
+def generate_stock_signals(today: str) -> Tuple[List[Dict], Dict]:
     """
-    Compute simple equal-weighted portfolio stats for the given holdings
-    over the last `lookback_days` trading days.
+    用 strategy/quant_layer2.py 的正式回測引擎產生今日訊號：
+      1. 正常跑一次（data_end=today）拿到真實的、可信的 stats/equity——
+         用真正的完整回測結果，不是舊版那種「最近 252 天等權近似」的
+         粗略估計，符合本專案「數字只能來自真實計算」的原則。
+      2. 用 for_live_signal=True 再跑一次拿到「用到今天為止的全部資料
+         建議、明天該持有什麼」的即時訊號（第一次那個 stats 對應的
+         positions 是回測安全版本，today 那列其實是「已經執行完」的
+         部位，不能拿來當作明天的操作建議，見 build_positions() 的
+         for_live_signal 說明）。
     """
+    logger.info("🧠 用 quant_layer2.py 產生今日訊號...")
+
+    stats, _, _ = q.run_pipeline(data_end=today, save_equity_path=None)
+    _, _, live_positions = q.run_pipeline(data_end=today, for_live_signal=True, save_equity_path=None)
+
+    today_row = live_positions.iloc[-1]
+    signal_date = live_positions.index[-1]
+    holdings = today_row[today_row > 0].sort_values(ascending=False)
+
+    prev_holdings = _load_prev_holdings(today)
+    curr_ids = set(holdings.index)
+
+    # 股票名稱存在 data/stock_names.json（data_pipeline/fetch_stock_names.py
+    # 產生的），不是 SQLite 表——舊版這裡查詢一個 load_manifest.stock_name
+    # 欄位，這個欄位其實從來就不存在，靜默失敗成空字典，讓通知裡的股票
+    # 名稱一直是空的。順手修正，讀真正存名稱的地方。
     try:
-        cols = [h for h in holdings if h in close.columns]
-        if not cols:
-            return {"annual_return": "N/A", "max_drawdown": "N/A", "sharpe": "N/A"}
-
-        recent = close[cols].iloc[-lookback_days:]
-        recent = recent.dropna(axis=1, how="all")
-        eq = recent.mean(axis=1).pct_change().dropna()
-        if eq.empty:
-            return {"annual_return": "N/A", "max_drawdown": "N/A", "sharpe": "N/A"}
-
-        total = (1 + eq).prod() - 1
-        ann_ret = (1 + total) ** (252 / max(len(eq), 1)) - 1
-        ann_vol = eq.std() * np.sqrt(252)
-        sharpe = (ann_ret - RF_RATE) / ann_vol if ann_vol > 0 else 0
-        mdd = ((1 + eq).cumprod() / (1 + eq).cumprod().cummax() - 1).min()
-
-        return {
-            "annual_return": f"{ann_ret*100:.1f}%",
-            "max_drawdown":  f"{mdd*100:.1f}%",
-            "sharpe":        f"{sharpe:.2f}",
-        }
+        names_path = BASE_DIR / "data" / "stock_names.json"
+        with open(names_path, encoding="utf-8") as f:
+            name_map = json.load(f)
     except Exception:
-        return {"annual_return": "N/A", "max_drawdown": "N/A", "sharpe": "N/A"}
+        name_map = {}
+
+    signals = []
+    for sid, w in holdings.items():
+        action = "BUY" if sid not in prev_holdings else "HOLD"
+        signals.append({
+            "stock_id": sid,
+            "stock_name": name_map.get(sid, ""),
+            "action": action,
+            "weight": round(float(w), 4),
+        })
+    for sid in prev_holdings - curr_ids:
+        signals.append({
+            "stock_id": sid, "stock_name": name_map.get(sid, ""),
+            "action": "SELL", "weight": 0.0,
+        })
+
+    signals.sort(key=lambda x: (x["action"] != "BUY", x["action"] != "HOLD"))
+
+    logger.info(
+        f"  訊號基準日：{signal_date.date()}（用 {today} 為止的資料算出，"
+        f"建議下個交易日執行）持倉 {len(holdings)} 檔"
+    )
+
+    if stats is None:
+        stats = {"annual_return": "N/A", "max_drawdown": "N/A", "sharpe": "N/A"}
+    stats = dict(stats)
+    stats["signal_basis_date"] = signal_date.strftime("%Y-%m-%d")
+    stats["holdings"] = len(holdings)
+
+    return signals, stats
 
 
 # ══════════════════════════════════════════════════════════════
-# PART 3  儲存訊號
+# PART 4  儲存訊號
 # ══════════════════════════════════════════════════════════════
 
-def save_signals(signals: list, stats: dict, today: str):
-    """把今日訊號存成 signals/YYYY-MM-DD.json"""
+def save_signals(signals: list, stats: dict, regime_info: dict,
+                 factor_decay_alerts: dict, today: str) -> Path:
     output = {
-        "date":        today,
-        "generated":   datetime.now().isoformat(),
-        "signals":     signals,
-        "stats":       stats,
+        "date": today,
+        "generated": datetime.now().isoformat(),
+        "signals": signals,
+        "stats": stats,
+        "regime": regime_info,
+        "factor_decay_alerts": factor_decay_alerts,
     }
     path = SIGNALS_DIR / f"{today}.json"
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(output, f, ensure_ascii=False, indent=2)
-    logger.info(f"  💾 訊號已儲存：{path}")
+        json.dump(output, f, ensure_ascii=False, indent=2, default=str)
+    logger.info(f"💾 訊號已儲存：{path}")
+    return path
 
 
 # ══════════════════════════════════════════════════════════════
-# PART 4  主程式
+# PART 5  主程式
 # ══════════════════════════════════════════════════════════════
 
-if __name__ == "__main__":
+def run_daily_update(sid_filter: Optional[str] = None,
+                     universe_top_n: Optional[int] = DAILY_UNIVERSE_TOP_N) -> bool:
+    """
+    universe_top_n：每日只更新這麼多檔活躍股（見 DAILY_UNIVERSE_TOP_N 的
+    說明）。傳 None 表示不設限、更新 DB 裡全部已知股票——正常每日排程
+    不會這樣用（太慢），只有真的需要一次全量刷新時才手動傳 None。
+    """
     today = str(date.today())
     logger.info(f"{'='*50}")
     logger.info(f"  台股量化系統 每日更新：{today}")
     logger.info(f"{'='*50}")
 
-    # Step 1：增量更新資料
-    logger.info("\n📥 Step 1a：增量更新價格 & 估值資料...")
-    ok = incremental_update()
+    universe: Optional[List[str]] = None
+    if sid_filter:
+        universe = [sid_filter]
+    elif universe_top_n is not None:
+        universe = get_top_n_universe(DB_PATH, universe_top_n)
+        logger.info(f"🎯 每日活躍宇宙：前 {universe_top_n} 檔（實際取得 {len(universe)} 檔）")
+
+    logger.info("\n📥 Step 1a：增量更新價格／估值...")
+    ok = incremental_price_valuation(sid_filter=sid_filter, stock_ids=universe)
     if not ok:
-        logger.error("資料更新失敗，終止流程")
-        exit(1)
+        logger.error("價格／估值更新失敗，終止流程")
+        return False
 
-    # Step 1b：增量下載籌碼資料
-    logger.info("\n📊 Step 1b：增量下載籌碼資料（三大法人）...")
-    incremental_institutional_update()  # 失敗不中止
+    logger.info("\n📊 Step 1b：增量更新三大法人資料...")
+    incremental_institutional_update(
+        top_n=None if sid_filter else universe_top_n, sid_filter=sid_filter,
+    )  # 非致命，失敗不中止
 
-    # ⚠️ Step 2-4 已停用：daily_update.py 用的是舊 Layer 2 訊號邏輯（含 bug，
-    # 會產生空訊號 / -73% MDD 這類錯誤結果，會覆蓋 predict_model.py 的正確訊號）。
-    # 訊號生成請改用 predict_model.py（N1 v2 ML 最終策略）。
-    logger.info("\n✅ 資料更新完成。產生最新訊號請執行：python predict_model.py")
+    logger.info("\n📈 Step 1c：增量更新融資融券／TAIEX 資料...")
+    incremental_margin_and_index(stock_ids=universe)  # 非致命，失敗不中止
+
+    logger.info("\n🧭 Step 2：計算機制訊號...")
+    regime_info, _ = compute_regime_signal()
+
+    logger.info("\n📉 Step 3：計算因子衰退警示...")
+    factor_decay_alerts = compute_factor_decay_alerts(today)
+
+    logger.info("\n🧠 Step 4：產生今日個股訊號...")
+    signals, stats = generate_stock_signals(today)
+
+    logger.info("\n💾 Step 5：儲存訊號...")
+    save_signals(signals, stats, regime_info, factor_decay_alerts, today)
+
+    logger.info("\n📡 Step 6：發送通知...")
+    notifier.notify_all(signals, stats, regime_info, factor_decay_alerts, today=today)
+
     logger.info(f"\n✅ 每日更新完成：{today}")
+    return True
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="每日自動化更新（Task 8）")
+    parser.add_argument("--sid", type=str, default=None,
+                        help="測試用：只更新指定一檔股票的價格/估值/法人/融資（TAIEX 不分股票，仍會更新）")
+    args = parser.parse_args()
+
+    logger.remove()
+    logger.add(sys.stdout, level="INFO",
+              format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}")
+
+    ok = run_daily_update(sid_filter=args.sid)
+    sys.exit(0 if ok else 1)

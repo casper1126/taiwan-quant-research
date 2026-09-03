@@ -11,7 +11,13 @@ on:
 jobs:
   daily-update:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Task 8（2026-08-23）調高：流程現在含機制偵測（regime_engine，HMM+
+    # LightGBM walk-forward）、因子衰退監控、兩次 quant_layer2 完整回測，
+    # 本機實測約 6-8 分鐘（每日活躍宇宙前 300 檔的正常增量，無配額耗盡
+    # 休眠），但遇到任何一段觸發 402 休眠（見 data_pipeline/finmind_common.py
+    # 的 60 分鐘/次）都可能讓總時間跳到 1-2 小時，原本 30 分鐘太容易誤殺
+    # 正常執行中的 job。
+    timeout-minutes: 120
 
     steps:
       # ── 1. 取得程式碼 ─────────────────────────────────────
@@ -58,13 +64,20 @@ jobs:
           mkdir -p data signals logs
 
       # ── 7. 執行每日更新 ───────────────────────────────────
+      # Task 8（2026-08-23）修正：腳本實際路徑是 automation/daily_update.py，
+      # 不是根目錄——這裡原本寫錯路徑，workflow 從來沒有真的成功執行過
+      # daily_update.py（找不到檔案就直接失敗）。
+      # 流程：Step 1a 價格/估值 → Step 1b 三大法人 → Step 1c 融資融券/TAIEX
+      # → Step 2 機制訊號 → Step 3 因子衰退警示 → Step 4 個股訊號（quant_layer2）
+      # → Step 5 存檔 signals/*.json → Step 6 LINE/Notion 通知（無 token 時
+      # 自動 dry-run，不會讓這個 step 失敗）。
       - name: Run daily update
         env:
           FINMIND_TOKEN:      ${{ secrets.FINMIND_TOKEN }}
           LINE_NOTIFY_TOKEN:  ${{ secrets.LINE_NOTIFY_TOKEN }}
           NOTION_TOKEN:       ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-        run: python daily_update.py
+        run: python automation/daily_update.py
 
       # ── 8. 把今日訊號推回 repo ────────────────────────────
       # signals/ 資料夾的 JSON 會累積每天的紀錄
