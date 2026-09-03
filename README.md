@@ -1,437 +1,531 @@
 # Taiwan Equity Quantitative Research System
 
 ![Python](https://img.shields.io/badge/Python-3.13-blue)
-![License](https://img.shields.io/badge/License-MIT-green)
-![Last Updated](https://img.shields.io/badge/Updated-2026--05-orange)
-![Status](https://img.shields.io/badge/Status-Production--ready-success)
+![Status](https://img.shields.io/badge/Status-Research--Paper--Trading-yellow)
+![Tests](https://img.shields.io/badge/pytest-101%2F101-brightgreen)
 
-> A multi-factor + machine-learning quantitative trading system for Taiwan equities.
-> Built as an MFE application portfolio piece. Demonstrates the full quant workflow:
-> data engineering → factor research → ML augmentation → walk-forward validation →
-> live trading via Discord bot.
-
----
-
-## Executive Summary
-
-| Metric | In-Sample (2015–2026) | OOS (Walk-Forward 2017–2025) |
-|--------|:---------------------:|:----------------------------:|
-| **CAGR** | **+11.20%** | **+8.54%** |
-| **Sharpe Ratio** | **0.70** | **0.58** |
-| **Max Drawdown** | -29.6% | -28.3% |
-| **Annual Turnover** | 1,939% | — |
-| **Positive Years** | 9 / 11 | 6 / 9 |
-
-**Strategy core**: Long-only Top-25 Taiwan equity portfolio,
-**52-week-high momentum (60%)** + **institutional flow (40%)** factor mix,
-combined with **LightGBM ensemble** (50% linear + 50% ML), risk-parity-weighted,
-4-tier market-timing exposure. Rebalanced every 21 trading days.
-
-**Vs. baseline**: Beats Taiwan multi-factor literature norms (~5–7% Sharpe-weighted CAGR)
-and original Layer-2 implementation (3.94% CAGR, 0.26 Sharpe) — a **3× Sharpe improvement**
-through systematic strategy iteration.
+> A multi-factor stock-selection strategy combined with a rule-based market-regime
+> risk overlay, built end-to-end on real Taiwan equity data (2012–present). Every
+> number in this document is reproducible from a file in `reports/` — where a test
+> failed or a factor showed no signal, that result is reported here rather than
+> removed.
 
 ---
 
-## Strategy Development Journey
+## 1. Overview
 
-The most valuable part of this project isn't the final number — it's the
-**experimental process** that led there. This is what an MFE program is teaching you to do:
-**form hypotheses, test rigorously, accept evidence, iterate**.
-
-### Timeline of versions
-
-| Version | Change | CAGR | Sharpe | Lesson |
-|--------:|--------|:----:|:------:|--------|
-| **v0** | Layer-2 baseline (4 factors, IC weighting) | +3.94% | 0.26 | Starting point |
-| **v1** | Layer-3 redesign (5 factors, risk parity, 3-tier timing) | -1.15% | -0.26 | Complexity ≠ alpha |
-| v2 | 4-tier timing with 30% floor | -0.90% | -0.25 | Marginal |
-| v3 | Industry cap (P0) | -1.50% | -0.30 | Worse |
-| v4 | Restored institutional flow factor | -1.50% | -0.30 | No change |
-| v5 | Add **mom_52w (52-week high momentum)** | -0.70% | -0.25 | Real factor unlocked |
-| v6 | Fix market-timing proxy (returns-based vs. median price) | +0.20% | -0.14 | Real bug fix |
-| **v7** | **Fix `composite` NaN bug** — different factors had non-overlapping NaN sets, full composite was empty 461 days | **+2.00%** | **+0.05** | 🐛 **Largest single improvement: +2.7% CAGR from one bug fix** |
-| v8/v9 | Add factor smoothing + industry-neutral z-score (P1) | +3.20% | +0.15 | Steady gains |
-| v10 (D) | Buffer 1.5× / risk-parity 50/50 equal-weight blend | +4.10% | +0.25 | Beats baseline |
-| v11 | Raw LightGBM | +4.80% | +0.18 | ML alone failed (overfit) |
-| v12 (E) | **Tamed ML**: rank target + L1/L2 + 50/50 ensemble | +5.60% | +0.35 | 🤖 ML works when constrained |
-| N1 | **Sharpe-proportional weight rebalance** (drop low_vol, mom 0.50, inst 0.35, value 0.10, rev 0.05) | +11.60% | +0.67 | 📊 **Pairing-analyzer-driven re-weighting was the breakthrough** |
-| **N1 v2** | **Pure 2-factor: mom 0.60 + inst 0.40** + limit-up/down filter | **+11.20%** | **+0.70** | ✅ Final answer |
-
-### Failed experiments (also valuable)
-
-| Attempt | Outcome | Lesson |
-|---------|--------|--------|
-| Pure ML strategy (30 features, no structural constraints) | -42.7% CAGR, Sharpe -0.07 | Structural risk controls aren't drag — they're protection |
-| Advanced ML (multi-horizon target + interaction features + multi-seed ensemble) | Sharpe 0.35 → 0.26 | More features ≠ smarter model. Simpler is better. |
-| 4 individual feature additions (ret_5d / ret_60d / vol_60d / log_size) | All −0.076 to −0.140 Sharpe | Validated by ablation that base 5 features are optimal |
-| 3 feature combinations (best pairs / triples) | All worse than baseline | Confirmed no combination wins |
-| CTA standalone on equal-weight proxy | -0.06 Sharpe, whipsaw heavy | Equal-weight proxy ≠ TAIEX. CTA needs trending instruments. |
-| Pairs trading (top-20 cointegrated pairs) | -1.09 Sharpe | Taiwan's ±10% limits + short-borrow constraints kill convergence |
-| L3 ML + PEAD overlay (was best for v12) | Worse than N1 alone | When main strategy is strong, adding correlated weak satellite hurts |
+This system selects a long-only portfolio of ~30 Taiwan-listed equities every 120
+trading days, ranking the top-300 most liquid, profitable stocks by an
+IC-weighted composite of five factors (momentum, value, revenue growth, low
+volatility, dividend yield). A separate, independently-computed **market regime
+detector** — combining a market-breadth health score, a Gaussian HMM, and a
+LightGBM crash-probability model — scales portfolio exposure between 10% and
+100% depending on how healthy the market currently looks. The design goal is
+not to maximize backtested return; it is to build a pipeline where every
+factor, every regime rule, and every performance number has been tested against
+real data and honestly reported, including the results that did not work.
 
 ---
 
-## System Architecture
+## 2. Architecture
 
-```
-data_pipeline/        Data engineering layer
-  ├── schema.py                    Cleaning rules + DDL
-  ├── cleaner.py                   Apply rules, output audit reports
-  ├── loader.py                    CSV → SQLite
-  ├── download_institutional.py    FinMind: incremental + parallel + rate-limited
-  └── fetch_stock_names.py         FinMind: stock name cache
+The system was built in eight sequential stages. Each stage is a real,
+independently testable module — later stages depend only on the outputs of
+earlier ones (e.g. `regime/` never imports from `strategy/`, only the reverse).
 
-strategy/             Research + production layer
-  ├── quant_layer2.py              Original 4-factor model (kept for reference)
-  ├── quant_layer3.py              ⭐ Final strategy (N1 v2 ML)
-  ├── walk_forward_l3.py           Anchored walk-forward validation
-  ├── pairing_analyzer.py          ⭐ Strategy pairing engine
-  ├── portfolio_combiner.py        3-sleeve combiner with grid search
-  ├── cta_module.py                CTA + market-cap proxy (research-only)
-  ├── pead_module.py               PEAD event-driven (research-only)
-  ├── pairs_module.py              Statistical arbitrage (research-only)
-  └── quant_pure_ml.py             Pure ML attempt (failure case study)
+| # | Layer | What it does | Key modules | Status |
+|---|-------|--------------|-------------|:---:|
+| 1 | **Data Pipeline** | FinMind ingestion of price/valuation/revenue/institutional-flow/margin/index data into SQLite, with idempotent upserts, a checkpoint-based resumable downloader, a cross-process download lock, and 402-quota-exhaustion auto-hibernate/resume | `data_pipeline/schema.py`, `loader.py`, `download_institutional.py`, `download_supplementary.py`, `download_lock.py`, `finmind_common.py` | ✅ Complete |
+| 2 | **Factor Library** | Modularized, IC-tested factor definitions with a single-signature interface (`factor(data) -> DataFrame`) | `strategy/factors/{base,style,taiwan}.py` | ✅ Complete |
+| 3 | **Regime Detection** | 0–100 market health score + Gaussian HMM bear-probability + LightGBM crash-probability, combined into a hysteresis-smoothed BULL/NEUTRAL/WARNING/BEAR classification | `regime/{indicators,health_score,hmm_detector,ml_alert,regime_engine,plot_regimes}.py` | ✅ Complete |
+| 4 | **Regime Integration** | Regime-conditional factor weights and continuous exposure scaling wired into the backtest engine; turnover decomposition | `strategy/quant_layer2.py` (`REGIME_FACTOR_WEIGHTS`), `strategy/portfolio.py` | ✅ Complete |
+| 5 | **ML Factor Synthesis** | LightGBM, expanding-window walk-forward (retrained yearly), as an alternative, non-linear factor combiner | `strategy/ml_composite.py` | ✅ Complete |
+| 6 | **Validation Framework** | Walk-forward OOS testing, 4-way ablation study, Deflated Sharpe Ratio / bootstrap significance testing, return-attribution decomposition | `strategy/{walk_forward,ablation,significance,attribution,benchmark_concentration}.py` | ✅ Complete |
+| 7 | **Research Integrity** | Survivorship-bias quantification attempt, rolling factor-decay monitoring, ADV-based capacity analysis | `data_pipeline/survivorship.py`, `regime/decay_monitor.py`, `strategy/capacity.py` | ✅ Complete |
+| 8 | **Automation** | Daily incremental data refresh (top-300 liquid universe), regime signal computation, live position generation, LINE/Notion notification (auto real-send / dry-run) | `automation/daily_update.py`, `automation/notifier.py`, `.github/workflows/daily_quant.yml` | ✅ Complete |
 
-analysis/             Diagnostic + ablation tools
-  ├── diagnose.py                  CAGR/Sharpe/MDD comparator
-  ├── show_holdings.py             Current portfolio dump
-  ├── verify_inst_flow.py          Data quality check
-  ├── debug_timing.py              Market-timing inspector
-  ├── sweep_top2_weights.py        Factor-weight grid search
-  ├── n1_pead_sweep.py             Two-strategy blend sweep
-  ├── o2_ablation.py               Feature ablation (single)
-  ├── o2_combinations.py           Feature ablation (combinations)
-  └── run_pairing.py               Multi-strategy pairing pipeline
-
-automation/           Daily scheduling
-  └── daily_update.py              Incremental data + signal generation
-
-predict_model.py      ⭐ Bot-callable signal generator (writes signals/*.json)
-bot.py                Discord bot (slash commands: /signals /actions /run_model)
-```
+101/101 unit tests pass across all eight layers (synthetic-data tests validating
+logic correctness, not strategy performance).
 
 ---
 
-## Final Strategy Specification
+## 3. Factor Methodology
 
-### Universe filter
-```
-day-by-day:
-  liquid_mask    = top-300 by 252-day rolling dollar volume (close × volume)
-  trading_mask   = liquid_mask AND |daily_return| < 9.5% AND not_disciplinary
-                                  ↑ filter 漲跌停 (cannot trade)
-                                                       ↑ hook for 處置股 list
-```
+All IC statistics below are cross-sectional Spearman rank correlations between
+the factor value and each stock's forward 20-trading-day return, computed on
+the top-300-liquidity universe over the full available sample
+(2015–2026-08, extended backtest range 2012–2026 for regime detection).
 
-### Factor composite
-```
-mom_52w (60%):  close(t) / max(close[t-252:t])     [George & Hwang 2004]
-inst_flow (40%): rolling_60_sum(foreign + trust net buy)
+### 3.1 Factors currently in the live composite
 
-both factors:
-  → 10-day rolling smoothing  (reduce daily noise)
-  → industry-neutral z-score  (rank within industry, not global universe)
+| Factor | Definition | Economic logic | IC (mean) | ICIR | Reference |
+|---|---|---|---:|---:|---|
+| **Momentum** (`momentum`) | 52-week-high price ratio | Investors anchor to the 52-week high and underreact to good news once a stock approaches it, causing slow price discovery | 0.0378 | — | George & Hwang (2004); Jegadeesh & Titman (1993) |
+| **Value** (`value`) | 0.5×(1/PER) + 0.5×(1/PBR) | Classic value premium — cheap-on-fundamentals stocks are systematically underpriced relative to risk/behavioral biases | 0.0221 | — | Fama & French (1993, 2015) |
+| **Revenue growth** (`rev_yoy`) | YoY monthly revenue growth, 40-day publication-lag shifted | Market underreacts to real fundamental growth signals, similar to post-earnings-announcement drift | 0.0199 | — | Bernard & Thomas (1989) |
+| **Low volatility** (`low_vol`) | Inverse 60-day realized volatility | Leverage-constrained investors overpay for lottery-like high-volatility stocks, compressing their forward returns (the "low-vol anomaly") | 0.0349 | — | Ang, Hodrick, Xing & Zhang (2006); Frazzini & Pedersen (2014) |
+| **Dividend yield** (`div_yld`) | Trailing dividend yield | Proxy for mature, cash-flow-stable, market-underweighted companies — a value/quality factor in the same family as HML | **0.0424** | **0.268** | Fama & French (1993) |
 
-linear_composite = 0.60 × zscore(smoothed mom_52w) + 0.40 × zscore(smoothed inst_flow)
-ml_predictions   = LightGBM(5 base factors, target = 20d forward return rank)
-final_composite  = 0.50 × zscore(linear) + 0.50 × zscore(ml)
-```
+Weights are primarily assigned dynamically by 252-day rolling \|IC\| (recomputed
+daily, renormalized across whichever factors currently have data); the values
+above are the IC-proportional **fallback weights** used only when insufficient
+rolling history exists: `momentum 0.24 / value 0.14 / rev_yoy 0.13 / low_vol
+0.22 / div_yld 0.27`.
 
-### LightGBM details
-- **Training**: walk-forward, refit every 60 days, 4-year lookback
-- **Target**: 20-day forward percentile rank − 0.5 (rank-based, robust to outliers)
-- **Hyperparams**: `max_depth=3`, `n_estimators=100`, `min_child_samples=500`,
-  `reg_alpha=0.1`, `reg_lambda=0.1`, 3 random seeds for ensemble
-- **Walk-forward isolation**: training cutoff = refit_date − 30 days (buffer for fwd_ret leakage)
+`div_yld` was **formally adopted into the composite on 2026-09-03** — it is the
+highest-IC, highest-ICIR factor of the five, and the only one with a positive
+IC in every one of the 12 tested years (2015–2026). It had existed in the
+codebase since before this project's Task 1–9 initiative but had never been
+through a formal IC review; that gap was closed during Task 8's
+pre-acceptance audit (see `docs/DECISIONS.md`, "Task 8 驗收前疑點排查").
 
-### Portfolio construction
-```
-Top 25 stocks by composite score
-  + industry cap: max 6 stocks per industry, 25% weight per industry
-  + buffer zone: hold until rank > 37 (1.5× exit)
+### 3.2 Factors tested and honestly excluded
 
-Position weights (within selected 25):
-  w_i = 0.5 × (1/N) + 0.5 × (1/σ_i normalized)
-        ↑ equal weight   ↑ risk parity (60-day vol)
-  + clip(min=2.5%, max=8%)    iterative bound enforcement
-```
+Research integrity in this project means a negative result is reported with
+the same rigor as a positive one. Three factors were formally IC-tested and
+removed from the live composite; their code and data remain in the repository
+for transparency and possible future re-evaluation.
 
-### Market timing (4-tier exposure)
-```
-proxy = (1 + equal_weight_liquid_universe_return).cumprod()
-score = 0.6 × MA_score(10/30/60/120 day MAs) + 0.4 × TSMOM(252)
+| Factor | Definition | Why it was hypothesized to work | Test result | Verdict |
+|---|---|---|---|---|
+| `mom_120` | 120-day momentum | A longer-horizon momentum variant, complementary to the 52-week-high signal | IC 0.0212, ICIR 0.128, but **0.692 cross-sectional rank correlation with the primary `momentum` factor** — i.e. it is largely a redundant, weaker copy of an existing signal, not an independent one | **Removed** (2026-09-03) |
+| `inst_flow` | 60-day normalized foreign + trust investor net buying | Information-advantage hypothesis: institutional investors trade ahead of price moves | IC 0.0034, ICIR 0.037, IC>0 only 52.1% of the time, tested across 4 independent checks (raw-vs-normalized, pre/post full-history backfill, 5/50-record API spot-check, 5/10/20-day horizons, year-by-year 2015–2026) — no window, year, or specification produced a stable signal | **Removed** (2026-08-18) |
+| `margin_usage` | −1 × 20-day retail margin balance change | Rising margin balance signals speculative excess and predicts mean-reversion | IC −0.0039, ICIR −0.047, IC>0 only 47.9% of the time (linear test); independently re-tested with a non-linear LightGBM model on the full market — ranked **last in feature importance in all 9 walk-forward years** (rank std = 0, the only factor with zero year-to-year variation) | **Never adopted** — retained only as a decay-monitoring / ML-feature diagnostic, not in the linear composite |
 
-if score >= 0.75:  exposure = 100%   (full long)
-if score >= 0.50:  exposure =  70%
-if score >= 0.25:  exposure =  50%
-else:              exposure =  30%   (defensive floor — never fully cash)
-```
+Full write-ups: `reports/factor_negative_findings.md` (inst_flow/margin_usage,
+four rounds of independent verification), `docs/DECISIONS.md` (mom_120/div_yld,
+git-archaeology of when each factor was introduced relative to this project's
+2026-08-17 start date).
 
 ---
 
-## Walk-Forward Validation Results
+## 4. Regime Detection
 
-Each year of OOS performance computed using only data available up to that year.
-Strategy parameters are static (no data fitting), so the test is mainly
-data-leakage detection.
+`regime/` is an independently-computable module (it is only ever *called by*
+the strategy layer, never the reverse) that classifies each trading day into
+one of four states and maps that state to a suggested portfolio exposure.
 
-| Year | OOS Return | Sharpe | MDD | Avg Exposure |
-|:----:|:----------:|:------:|:---:|:------------:|
-| 2017 | +21.32% | 1.937 | -5.1% | 95.8% |
-| 2018 | -2.83% | -0.383 | -9.0% | 71.4% |
-| 2019 | +6.36% | 0.892 | -5.6% | 62.4% |
-| 2020 | -0.16% | -0.086 | -27.6% | 82.0% |
-| 2021 | +32.38% | 1.674 | -13.4% | 90.5% |
-| 2022 | -7.12% | -0.988 | -12.2% | 46.1% |
-| 2023 | +15.25% | 1.549 | -8.6% | 76.4% |
-| 2024 | +6.32% | 0.311 | -14.8% | 83.8% |
-| 2025 | +10.81% | 0.652 | -11.2% | 70.3% |
-| **Overall** | **+8.54%** | **0.578** | **-28.3%** | — |
+**Health score (0–100)** — a weighted composite of 7 components, each converted
+to a rolling-252-day percentile before combining:
 
-**Pattern**: Excellent in trending markets (2017, 2021, 2023, Sharpe > 1.5).
-Struggles in regime-change years (2018, 2020, 2022) — expected of a momentum-tilted strategy.
-**No look-ahead bias detected** (year-by-year OOS matches in-sample sub-periods).
+| Component | Weight | Direction |
+|---|---:|---|
+| Realized volatility percentile | 18 | inverted (lower vol = healthier) |
+| Market breadth (advancers − decliners) | 22 | — |
+| New highs − new lows | 13 | — |
+| Average pairwise stock correlation | 13 | inverted (lower correlation = healthier) |
+| Downside return asymmetry | 13 | inverted |
+| Margin-squeeze ratio | 12 | — |
+| Margin-capitulation bonus | +9 | flat bonus when triggered |
 
----
+(Core components sum to 91; the capitulation bonus brings the maximum to 100.
+An 8th candidate component, price-trend-vs-200-day-MA, was tested at weight 20
+and **rejected** after it only improved the 2023–24 BULL-rate acceptance
+criterion from 18.9% to 23.9% — short of the adoption bar — see
+`reports/health_score_breadth_divergence.md`.)
 
-## The Pairing Analyzer Insight
+**Three-way vote** (all thresholds are AND-combined per state):
 
-The single most important analytical tool was building a `pairing_analyzer.py`
-that tested each L3 factor **individually** (single-factor portfolio with same
-plumbing) and reported standalone Sharpe.
-
-This revealed:
-
-| Factor (alone) | CAGR | Sharpe | Used in v12? |
-|----------------|:----:|:------:|:-:|
-| **mom_52w** | +9.99% | **+0.561** | yes (20% weight) |
-| **inst_flow** | +7.73% | **+0.422** | yes (10% weight) |
-| value | +3.01% | +0.117 | yes (30% weight ⚠️) |
-| rev_mom | +2.10% | +0.034 | yes (20% weight ⚠️) |
-| **low_vol** | **−3.39%** | **−0.561** | yes (20% weight ❌) |
-
-**The killer**: `low_vol` was *dragging the portfolio down by 3.4% per year*
-yet had 20% of the capital. After Sharpe-proportional re-weighting (drop low_vol,
-boost mom + inst), CAGR jumped from 5.6% → 11.2% in a single iteration.
-
-**Lesson**: Always single-factor-decompose before composite-weighting.
-The composite isn't always the sum of its parts — sometimes parts are negative.
-
----
-
-## Critical Bug Fixes (Most Impactful Commits)
-
-### 1. Composite NaN propagation (v6 → v7)
-The original `build_composite` used `pd.add(... fill_value=np.nan)`.
-With 5 factors having different NaN coverage (PER cap, IVOL 60d window,
-revenue 40d delay, inst 60d window, mom 252d window), the **intersection
-of valid stocks could be zero on rebalance days**.
-
-This caused **461 / 2,748 OOS days (16.8%)** to have *empty* composites and
-thus *zero portfolio* — a silent disaster.
-
-```python
-# Before (broken):
-composite = composite.add(zs * w, fill_value=np.nan)
-# Any stock missing any factor → NaN composite → not selected
-
-# After (fixed):
-composite = composite.add(zs * w, fill_value=0)
-# Missing factor treated as neutral z-score = 0
-# Plus filter: at least one factor must have a real value
+```
+health ≥ 60  AND  p_bear < 0.3  AND  crash_prob < 0.3   → BULL     (exposure 1.0)
+health ≥ 45  AND  p_bear < 0.5                          → NEUTRAL  (exposure 0.7)
+health ≥ 30  OR   p_bear < 0.7                          → WARNING  (exposure 0.4)
+otherwise                                                → BEAR     (exposure 0.1)
 ```
 
-**Impact**: −0.7% CAGR → +2.0% CAGR (single-line fix).
+- **`p_bear`** — a 3-state Gaussian HMM fit on an expanding window (refit
+  monthly, minimum 504 days of history), Hamilton (1989).
+- **`crash_prob`** — a LightGBM classifier predicting "TAIEX return over the
+  next 20 days < −5%", retrained every year on an expanding window
+  (walk-forward, no look-ahead).
 
-### 2. Market-timing proxy regime change (v5 → v6)
-Original timing used `close.where(liquid_mask).median(axis=1)` as the proxy
-"market index". When liquid universe rotated in/out of stocks, this median
-**jumped discontinuously**, breaking moving-average comparisons.
+An **asymmetric hysteresis** filter (18 days of confirmation to upgrade to a
+better state, only 3 days to downgrade) suppresses noise-driven flip-flopping
+without slowing crisis detection — the 2020-02/03 COVID crash and full-year
+2022 bear market are both detected at full speed since detection relies on the
+fast downgrade path, unaffected by the slower upgrade path.
 
-Replaced with proper returns-based equal-weight cumulative index — eliminates
-universe-rotation jumps and matches TAIEX with >0.95 correlation.
+**Known reliability limitation of the third vote (honestly disclosed, not
+fixed)**: `crash_prob`'s pooled out-of-sample AUC across all 13 walk-forward
+years (2014–2026) is **0.493** (n=3,068, 272 positive labels) — statistically
+indistinguishable from a coin flip. This is not a code bug (`predict_proba`
+class ordering was verified correct in the worst years) and not fixable by
+simple regularization (early-stopping was tested and produced inconsistent,
+unstable results). The root cause is that the crash label (a 20-day rolling
+window) produces highly autocorrelated labels from very few truly independent
+crash episodes per year (1–6 in most years, only 1 in 2023 and 2024), making
+any single year's AUC estimate extremely high-variance. The full diagnosis —
+including the year-by-year AUC table, the independent-episode breakdown, and
+the pooled-AUC computation — is in `reports/ml_alert_reliability_diagnosis.md`.
+**Decision**: this limitation is documented rather than silently ignored, but
+`classify_regime_raw()`'s formula was deliberately **not** changed, because
+doing so would invalidate the already-accepted Task 3–6 validation numbers
+that were computed on the current formula; `crash_prob` is one of three
+AND-combined votes, so its near-random behavior means it occasionally
+misfires a boundary call rather than corrupting the whole classification.
 
-### 3. Limit-up/limit-down filter (latest)
-Original assumed all liquid-universe stocks were tradable at close.
-In reality, ~5–10% of rebal days have at least one Top-25 candidate at limit-up
-(can't enter) or in current holdings at limit-down (can't exit).
-
-Added `daily_return` filter at ±9.5%. Realistic CAGR drop: 11.6% → 11.2%
-(0.4% slippage = honest cost of execution friction).
-
----
-
-## Discord Bot Integration
-
-Live trading workflow via Discord (`bot.py`):
-
-| Command | Action |
-|---------|--------|
-| `/run_model` | Runs `predict_model.py`, generates `signals/YYYY-MM-DD.json` |
-| `/signals` | Top-10 holdings + industry breakdown (Embed) |
-| `/actions` | BUY / TRIM / HOLD / SELL diff vs. `portfolio.json` |
-| `/report` | Live P/L using TWSE real-time API |
-| `/update_portfolio` | Manually log executed trades |
-| `/set_threshold` | Configure alert sensitivity |
-
-`signals/latest.json` schema:
-```json
-{
-  "rebalance_date": "2026-04-17",
-  "strategy": "N1 v2 ML (mom_52w 60% + inst_flow 40%)",
-  "exposure": 1.0,
-  "n_holdings": 25,
-  "positions": [
-    {"rank": 1, "symbol": "2887", "name": "台新金",
-     "weight": 0.0678, "industry": "金融", "target_dollars": 339215, ...}
-  ],
-  "actions": [
-    {"symbol": "2887", "action": "BUY", "target_lots": 2,
-     "target_shares": 2000, "price_ref": 22.5, ...}
-  ],
-  "industry": {"電子中上游": 0.247, "電子下游": 0.233, ...}
-}
-```
-
-`monitor_market` task polls `signals/latest.json` every 5 minutes — pushes the
-top-conviction BUY to Discord (with 1-hour deduplication).
+![Regime History](reports/regime_history.png)
 
 ---
 
-## Lessons for Future Self / Reader
+## 5. Performance
 
-1. **Complexity ≠ alpha.** Layer 3 v1 had more sophistication than Layer 2 (5 factors, risk parity,
-   monthly rebal, 4-tier timing) yet performed *worse* (-1.15% vs +3.94%). Each addition needs to
-   prove itself empirically.
+All numbers below come directly from files in `reports/`. Where a result is a
+frozen point-in-time report (Task 6, computed as of 2026-04-17) versus the
+live, continuously-updating pipeline (Task 8, `data_end=today`), both are
+shown and reconciled rather than the newer number quietly replacing the older
+one.
 
-2. **Bug fixes outweigh feature additions.** The single largest improvement (+2.7% CAGR) came from
-   fixing `pd.add(..., fill_value=np.nan)` → `fill_value=0`. Always audit composite arithmetic for
-   NaN propagation.
+### 5.1 Task 2 baseline (dynamic IC-weighted composite, no regime overlay)
 
-3. **Decompose before composing.** The `pairing_analyzer.py` revealed that one factor (low_vol) was
-   actively *losing* money standalone. ICIR / IC analysis at the composite level missed this because
-   the composite *averaged* the bad factor with good ones.
+This is the version all Task 6 statistical tests below are computed against.
 
-4. **Walk-forward catches overfitting; nothing else does.** The "advanced ML" attempt looked
-   promising in-sample but Sharpe dropped from 0.73 → 0.58 with extra features. Without OOS
-   testing, this would have been deployed.
+| Metric | Value (as of 2026-04-17, frozen) |
+|---|---:|
+| Total return | +92.1% |
+| Annualized return | +6.5% |
+| Sharpe ratio | 0.39 |
+| Max drawdown | −24.9% |
+| Annual turnover | 255.2% |
 
-5. **Structural constraints aren't drag — they're protection.** "Pure ML" with no industry caps,
-   no risk parity, no timing yielded -43% MDD. The structural overlays carry risk control
-   that the model alone won't learn.
+The daily automation's first real full pipeline run (2026-08-28 data,
+generated 2026-08-29, *before* the factor fix in Section 3.1 was made) showed
+**total return +129.6%, CAGR +8.0%, Sharpe 0.51, MDD −24.9%, turnover 255.5%**
+— an unexplained-looking +37.5-point jump from the 92.1% baseline above that
+was flagged and fully investigated before Task 8 was accepted (`docs/DECISIONS.md`,
+"Task 8 驗收前疑點排查"). A controlled 2×2 decomposition (factor composition
+× backtest end-date, each varied independently) showed the jump is **not**
+a discrepancy requiring further action: **+31.9 of the +37.5 points come from
+4.3 additional months of real trading days** alone (TAIEX rose +25.9% from
+36,804 to 46,331 in that window; compounding the original 92.1% return by
+that market move reproduces 129.6% almost exactly: 1.921 × 1.195 = 2.296),
+and only **+5.6 points come from the `mom_120`→`div_yld` factor fix** itself
+(92.1%→97.7% at the original end-date). Recomputed with **both** the current
+factor composite *and* the same extended end-date — i.e. what the pipeline
+produces today — the figures are **total return +136.5%, CAGR +8.3%, Sharpe
+0.54**. Task 6's original 92.1% report is not stale or wrong; it is a correct
+snapshot as of 2026-04-17, and any live, continuously-updating pipeline's
+headline numbers will keep drifting upward from that snapshot as long as the
+underlying market keeps rising — that drift is expected behavior, not an
+error.
 
-6. **Not all strategies suit Taiwan.** CTA (whipsaw on equal-weight proxy), pairs trading
-   (±10% limits, short borrow), and momentum-only (cleaner monthly rebal works) all behave
-   differently from US equivalents. Local market structure matters.
+### 5.2 Walk-Forward Out-of-Sample Validation (Task 6a)
 
-7. **The right blend depends on relative strength.** L3 v12 (Sharpe 0.35) + PEAD (Sharpe 0.36) =
-   improvement (Sharpe 0.40). N1 v2 (Sharpe 0.70) + PEAD = *worse* (PEAD becomes a drag).
-   Diversification math depends on which strategy is the anchor.
+Genuine train/test split: factor weights for year *y* are computed only from
+data in `[2015-01-01, y-1]`, frozen, then applied unchanged to year *y*.
+
+| Year | Annual Return | Sharpe | Max Drawdown | Turnover |
+|---|---:|---:|---:|---:|
+| 2020 | +2.2% | 0.040 | −26.3% | 343% |
+| 2021 | +25.9% | 1.684 | −11.8% | 317% |
+| 2022 | −13.3% | −1.103 | −23.6% | 342% |
+| 2023 | +18.6% | 1.969 | −7.9% | 366% |
+| 2024 | +7.2% | 0.438 | −9.1% | 222% |
+| 2025 | −1.2% | −0.156 | −18.5% | 249% |
+
+**Overall OOS (chained daily): +37.8% total, +5.7% annualized, Sharpe 0.288,
+MDD −26.3%, 4/6 positive years** — passes the ≥4/6 acceptance criterion.
+
+### 5.3 Ablation Study (Task 6b) — same conditions, only the ranking method / regime overlay changes
+
+| Version | Description | Total Return | CAGR | Sharpe | MDD | Turnover |
+|---|---|---:|---:|---:|---:|---:|
+| A | Fixed weights, no regime | +68.7% | +5.1% | 0.301 | −24.2% | 223.8% |
+| B | Fixed weights + regime exposure | +14.8% | +1.3% | −0.054 | −11.1% | 72.8% |
+| C | Dynamic IC weights + regime exposure | +17.2% | +1.5% | 0.011 | −10.8% | 76.0% |
+| D | ML composite + regime exposure | +10.1% | +1.3% | −0.089 | −10.1% | 64.4% |
+
+- **B vs A drawdown improvement ≥25%**: 54.2% actual → ✅ **pass**
+- **B vs A Sharpe ≥ A − 0.1** (i.e. ≥ 0.201): −0.054 actual → ❌ **fail**
+
+The regime overlay dramatically reduces risk (MDD and volatility both cut by
+more than half) but sacrifices absolute return during this sample's historic
+bull run, because BULL state — full 100% exposure — is confirmed on only
+**1.9% of all trading days across 2012–2026** (the health-score/hysteresis
+design is deliberately conservative about declaring "everything is fine").
+This is a real, honestly-measured risk/return trade-off, not a bug.
+
+### 5.4 Statistical Significance (Task 6c)
+
+Tested against the Task 2 baseline (annualized 6.46%, Sharpe 0.393, 2,627
+trading days, n_trials=8 for the 8 real strategy variants actually built and
+backtested in this project).
+
+| Test | Result | Significant? |
+|---|---|:---:|
+| Deflated Sharpe Ratio (Bailey & López de Prado, 2014) | 0.4190 | ❌ No (threshold 0.95) |
+| Sharpe 95% CI (Lo, 2002) | [−0.056, 1.132] | ❌ No (contains 0) |
+| Bootstrap p-value vs. TAIEX buy-and-hold (10,000 resamples) | p = 0.0272 | ✅ **Yes — but negative**: the strategy significantly **underperforms** the TAIEX by ~7.4 annualized percentage points |
+
+**This underperformance finding is reported alongside its full follow-up
+context, not in isolation.** A dedicated diagnosis
+(`strategy/benchmark_concentration.py`,
+`reports/benchmark_concentration_analysis.md`) asked whether "losing to TAIEX"
+reflects genuinely poor stock-picking or simply the fact that TAIEX is a
+market-cap-weighted index dominated by a single mega-cap stock (TSMC):
+
+| Benchmark | Benchmark Total Return | Strategy vs. Benchmark (annualized) | p-value | Significant? |
+|---|---:|---:|---:|:---:|
+| Market-cap-weighted TAIEX (official index) | +296.9% | −7.38% | 0.0272 | ✅ Underperforms |
+| Equal-weight proxy TAIEX | +142.7% | −2.56% | 0.4192 | ❌ Not significant |
+| Proxy TAIEX excluding TSMC | +126.6% | −3.29% | 0.5074 | ❌ Not significant |
+
+TSMC alone contributed an estimated **+29.4 percentage points (18.9% of
+total return)** to a volume-proxied market-cap index over this period — and
+that is likely an *underestimate*, since the proxy (price × volume, no
+share-count data available) captures only a 6.2% average TSMC weight versus
+TSMC's real-world 25–35% TAIEX weight. **Both findings stand side by side**:
+the strategy does not underperform a broad or ex-TSMC benchmark, but it does
+significantly underperform the real, official market-cap-weighted TAIEX,
+which is the standard benchmark this project uses. Neither finding cancels
+the other.
+
+### 5.5 Return Attribution (Task 6d)
+
+Identity decomposition (not an estimate — the four terms are defined to sum
+exactly to total return) on the fixed-weight version (Ablation A, +68.7% net):
+
+| Component | Contribution |
+|---|---:|
+| Momentum marginal contribution (weight 0.34) | +31.0% |
+| Value marginal contribution (weight 0.18) | +11.9% |
+| Revenue growth marginal contribution (weight 0.18) | +6.5% |
+| Low-vol marginal contribution (weight 0.30) | +9.9% |
+| **Σ factor contributions** | **+59.3%** |
+| Market-timing contribution | +27.7% |
+| Trading costs | −8.3% |
+| Residual (factor-combination interaction effect) | −10.0% |
+| **Reconstructed total (identity check)** | **+68.7% ✅ matches actual** |
+
+### 5.6 ML vs. Linear Factor Combination (Task 5)
+
+| Metric | Linear (Task 2 baseline) | ML (LightGBM, walk-forward) |
+|---|---:|---:|
+| Total return | +92.1% | +64.3% (includes 2015–17 warm-up drag) |
+| Annualized return | +6.5% | +6.8% |
+| Sharpe | 0.39 | 0.44 |
+| Max drawdown | −24.9% | −34.0% |
+| Annual turnover | 255.2% | 330.2% |
+
+The ML version's predictions only exist from 2018 onward (2015–17 is
+expanding-window warm-up, during which it holds no position), which drags down
+its cumulative total return but not its more fairly-comparable annualized
+figures. Annualized return and Sharpe are marginally *better*, but drawdown
+and turnover are meaningfully worse — a genuine mixed result, not a clear win
+either way. **`use_ml_composite` defaults to `False`**; the linear composite
+remains the production default, with the ML path retained as a documented,
+selectable alternative.
 
 ---
 
-## Quick Start
+## 6. Limitations
+
+This section is deliberately the most detailed part of this document.
+
+**1. Survivorship bias — cannot be precisely quantified.** This project
+attempted to obtain an official delisting registry via a TEJ TRAIL/AIND
+subscription; the trial key had expired by the time of testing (subscription
+window 2026-04-27 to 2026-07-27). Falling back to a FinMind-based staleness
+check identified 97 candidate stocks (4.7% of the 2,056-stock study universe)
+whose data stopped updating, but cross-referencing showed all 97 remain listed
+in FinMind's current registry — meaning this signal mostly reflects this
+project's own data-pipeline coverage gaps, not genuine delistings, and Taiwan's
+ticker-recycling practice (a delisted code can be reassigned to an unrelated
+new company) makes registry-based detection unreliable on its own. Per Shumway
+(1997), ignoring delisting returns typically inflates backtested performance
+by **2–4 percentage points per year** — reported return figures in this
+document should be read with that literature-based discount in mind. Full
+methodology: `reports/survivorship_analysis.md`.
+
+**2. Multiple testing / selection bias.** This strategy was arrived at after
+building and backtesting at least **8 real, materially different variants**
+(the same 8 used as `n_trials` in the Deflated Sharpe Ratio calculation, §5.4).
+The DSR of 0.4190 explicitly accounts for this multiple-comparisons penalty
+and falls well short of the 0.95 significance threshold — the honest
+conclusion is that the current sample cannot yet rule out that the observed
+Sharpe ratio is attributable to selection from repeated iteration rather than
+genuine skill.
+
+**3. ML crash-alert reliability.** As detailed in §4, the `crash_prob`
+component of the regime detector has a pooled out-of-sample AUC of 0.493 across
+13 years — no better than random guessing. It remains one of three
+AND-combined votes rather than the sole risk signal, but its contribution to
+the regime classification's actual information content is close to zero.
+Full diagnosis: `reports/ml_alert_reliability_diagnosis.md`.
+
+**4. Single-market scope.** Every factor, regime rule, and validation result
+in this repository is calibrated and tested on Taiwan-listed equities only.
+None of it has been tested for transferability to other markets.
+
+**5. Partially in-sample regime design.** The health-score component weights
+(§4) and the hysteresis confirmation windows (18 days up / 3 days down) were
+manually chosen and tuned against the same historical sample used to validate
+the regime detector's acceptance criteria — they were not derived from a
+separate, held-out calibration period. This is disclosed as a design
+limitation, not hidden behind the regime detector's otherwise-legitimate
+walk-forward validation of the downstream *strategy*.
+
+**6. Absolute-return underperformance vs. the real benchmark.** As detailed in
+§5.4, the strategy's Task 2 baseline significantly underperforms the
+official, market-cap-weighted TAIEX index over 2015–2026 (bootstrap p=0.0272,
+≈7.4 annualized percentage points), though this appears substantially — not
+completely — attributable to the benchmark's concentration in a single
+mega-cap stock (TSMC) rather than to the strategy's stock-selection ability.
+
+**7. Strategy capacity.** Using the ADV-5%-of-20-day-volume rule applied to 22
+real historical rebalance events, deployable capital is constrained to
+approximately **NT$32.0 million – NT$269.5 million** (median ≈ NT$106.6
+million; most recent rebalance, 2025-11-04: NT$263.1 million), always bound by
+the least-liquid holding in the portfolio at that time. This is a strategy
+suited to individual or small-fund capital, not institutional scale, without
+redesigning the universe or position-sizing rules. Full analysis:
+`reports/capacity_analysis.md`.
+
+**8. Paper trading has not yet begun.** Task 8 (automation) was completed on
+2026-09-03. See §8 below for the forward-looking paper-trading commitment.
+
+---
+
+## 7. Data Sources
+
+**Primary source: [FinMind](https://finmindtrade.com/) API.** All price,
+valuation, revenue, institutional-flow, margin-trading, and TAIEX index data
+in this project comes from FinMind. **Secondary source attempted: TEJ**
+(`TRAIL`/`AIND` delisting registry) — the project's trial TEJ key was
+confirmed expired at test time (see Limitation 1); the system was designed
+with a TEJ-primary / FinMind-fallback pattern (`data_pipeline/survivorship.py`,
+`requirements1.txt` includes `tejapi`), so re-subscribing to TEJ would let the
+existing code re-run with a real delisting registry with no further
+development needed.
+
+**Real, verified data-availability floors** (queried directly against the
+FinMind API, not assumed from documentation — see `docs/DATA_AVAILABILITY.md`):
+
+| Dataset | Real earliest available date |
+|---|---|
+| Individual stock price | Listing-dependent (e.g. TSMC 1994-09-13; as early as 1992-01-04 for others) |
+| Margin trading | 2001-01-05 |
+| Monthly revenue | 2002-02-01 |
+| TAIEX index | 1999-01-05 |
+| Institutional investor buy/sell | **2012-05-02** (corrects an earlier, unverified assumption of 2005-01-01) |
+
+Because institutional-flow data is the binding constraint, the regime-detection
+system's full-coverage backtest window starts at **2012-05-02**; the core
+strategy backtests in §5 primarily use **2015-01-01** onward, matching the
+project's original Task 1–9 specification window.
+
+**Known data gaps**: 97/2,056 stocks (4.7%) have institutional-flow data that
+stopped updating without a confirmed cause (see Limitation 1); all other
+tables passed their Task 1 coverage acceptance criteria (≥1,500 stocks each
+for institutional flow and margin trading, full TAIEX coverage 2015–2026).
+
+---
+
+## 8. Installation & Usage
 
 ```bash
-# 1. Install dependencies
+# Install dependencies
 pip install -r requirements1.txt
-pip install requests loguru tqdm lightgbm scikit-learn matplotlib python-dotenv discord.py
 
-# 2. Configure secrets (.env file)
-cat > .env <<EOF
+# Configure secrets (create a .env file; never commit this)
 FINMIND_TOKEN=your_finmind_token
-DISCORD_TOKEN=your_discord_bot_token
-ADMIN_ID=your_discord_user_id
-NOTIFICATION_CHANNEL_ID=your_channel_id
-EOF
+LINE_NOTIFY_TOKEN=your_line_token         # optional — omit for dry-run mode
+NOTION_TOKEN=your_notion_token            # optional — omit for dry-run mode
+NOTION_DATABASE_ID=your_notion_db_id      # optional — omit for dry-run mode
 
-# 3. Pipeline (one-time setup)
-python run.py --step 1                            # Load CSVs into SQLite
-python run.py --step 1b                           # Download institutional data
-python data_pipeline/fetch_stock_names.py         # Cache stock names
+# One-time setup: load historical CSVs into SQLite
+python run.py --step 1 --dir raw_data
 
-# 4. Run backtests
-python strategy/quant_layer3.py --ml              # Final strategy
-python strategy/walk_forward_l3.py --ml           # OOS validation
+# Backfill institutional/margin/index data (parallel-aware, resumable)
+python run.py --step 1b --workers 4
 
-# 5. Generate today's trade signals
-python predict_model.py                           # Writes signals/latest.json
+# Run the full multi-factor backtest
+python run.py --step 2
 
-# 6. Run Discord bot
-python bot.py
-# Then in Discord: /run_model, /signals, /actions
+# Run walk-forward out-of-sample validation
+python run.py --step 3
+
+# Utilities
+python run.py --stats            # row counts per table
+python run.py --verify 2330      # spot-check a single stock's data
+
+# Run the daily automation pipeline manually
+# (incremental data refresh → regime signal → factor decay check →
+#  live positions → signals/YYYY-MM-DD.json → LINE/Notion notify)
+export FINMIND_TOKEN="your_token"
+python automation/daily_update.py
+
+# Scheduled automatically via GitHub Actions:
+# .github/workflows/daily_quant.yml, 14:30 Taiwan time (06:30 UTC), Mon–Fri
 ```
 
----
-
-## Module Quick-Reference
-
-| File | Purpose |
-|------|---------|
-| `strategy/quant_layer3.py` | Production strategy (N1 v2 ML) |
-| `strategy/walk_forward_l3.py` | OOS validation engine |
-| `strategy/pairing_analyzer.py` | Strategy pairing recommendation engine |
-| `predict_model.py` | Generate signals for Discord bot |
-| `bot.py` | Discord bot with slash commands |
-| `analysis/run_pairing.py` | Reproduce the pairing-analyzer insight |
-| `reports/walk_forward_l3_ml.md` | Full OOS report |
-| `reports/equity_curve_L3_ml.csv` | Final strategy equity curve |
-| `reports/pairing_results.csv` | Single-factor decomposition results |
+`notifier.py` automatically switches between real delivery and dry-run mode
+based solely on whether `LINE_NOTIFY_TOKEN` / `NOTION_TOKEN` /
+`NOTION_DATABASE_ID` are set — in dry-run mode, the fully-composed message is
+logged and saved to `signals/{date}_notify_{line,notion}.json` rather than
+sent, so the pipeline is testable end-to-end with zero external
+notification credentials configured.
 
 ---
 
-## Future Work
+## 9. Paper Trading
 
-| Direction | Expected Gain | Effort |
-|-----------|:-------------:|:------:|
-| TEJ premium financial-statement data → real ROE / Quality factor | +1–3% CAGR | 1 week |
-| FinBERT sentiment on PTT 股票版 / Mobile01 | +2–3% CAGR | 2–3 weeks |
-| Add 處置股 dataset to `trading_mask` | Reduce slippage | 1 day |
-| 台指期 (TX) futures — true CTA component | +2–4% CAGR | 1 week |
-| Black-Litterman blending of analyst targets | +0.5–1% CAGR | 3 days |
-| LSTM/Transformer for cross-asset signal | +2–5% CAGR | 1 month |
-
-The 8.54% OOS CAGR is the ceiling of what 5 traditional factors + LightGBM can extract
-from the public data we have. Breaking through 12–15% CAGR realistically requires
-**alternative data ingestion** (the modern quant edge: Two Sigma, Citadel GQS, WorldQuant).
-
----
-
-## References
-
-Academic foundations:
-
-- Asness, Frazzini, Pedersen (2013). *The Devil in HML's Details*. **Journal of Finance**.
-- Asness, Frazzini, Pedersen (2019). *Quality Minus Junk*. **Review of Accounting Studies**.
-- Asness, Moskowitz, Pedersen (2013). *Value and Momentum Everywhere*. **Journal of Finance**.
-- Daniel, Moskowitz (2016). *Momentum Crashes*. **Journal of Financial Economics**.
-- Fama, French (1993). *Common Risk Factors in the Returns on Stocks and Bonds*.
-  **Journal of Financial Economics**.
-- Frazzini, Pedersen (2014). *Betting Against Beta*. **Journal of Financial Economics**.
-- George, Hwang (2004). *The 52-Week High and Momentum Investing*. **Journal of Finance**.
-- Gu, Kelly, Xiu (2020). *Empirical Asset Pricing via Machine Learning*. **Review of Financial Studies**.
-- Jegadeesh, Titman (1993). *Returns to Buying Winners and Selling Losers*. **Journal of Finance**.
-- McLean, Pontiff (2016). *Does Academic Research Destroy Stock Return Predictability?*. **Journal of Finance**.
-- Moskowitz, Ooi, Pedersen (2012). *Time Series Momentum*. **Journal of Financial Economics**.
-
-Taiwan-specific:
-
-- Ko, Lin, Su, Chang (2014). *Value Investing and Technical Analysis in Taiwan Stock Market*.
-  **Pacific-Basin Finance Journal**.
-- TEJ Factor Library Series (2024–2025) — empirical factor performance in Taiwan.
+Starting from this document's publication date (2026-09-03), every file
+written to `signals/YYYY-MM-DD.json` by the daily automation pipeline (§8) is
+this project's live paper-trading record — the exact positions and portfolio
+statistics the strategy would have taken with zero human intervention, using
+only information available as of that date. No backtested number in this
+README should be treated as a live-trading claim; **`reports/paper_trading_3m.md`**
+will be produced approximately three months from this date, comparing the
+accumulated `signals/*.json` history against this document's backtested
+expectations (§5) to check whether real-time, point-in-time signal generation
+degrades performance relative to the backtest — a common and important gap to
+verify before treating any backtest as investment-grade evidence.
 
 ---
 
-## Author
+## 10. Academic References
 
-**Casper Hsiao** ([casperhsiao26@gmail.com](mailto:casperhsiao26@gmail.com))
-Department of Mathematical Sciences, NCCU
-MFE applicant, 2026
+**Factor research**
+1. Fama, E.F., French, K.R. (1993). Common Risk Factors in the Returns on Stocks and Bonds. *Journal of Financial Economics*.
+2. Fama, E.F., French, K.R. (2015). A Five-Factor Asset Pricing Model. *Journal of Financial Economics*.
+3. Jegadeesh, N., Titman, S. (1993). Returns to Buying Winners and Selling Losers: Implications for Stock Market Efficiency. *Journal of Finance*.
+4. George, T.J., Hwang, C-Y. (2004). The 52-Week High and Momentum Investing. *Journal of Finance*.
+5. Ang, A., Hodrick, R.J., Xing, Y., Zhang, X. (2006). The Cross-Section of Volatility and Expected Returns. *Journal of Finance*.
+6. Frazzini, A., Pedersen, L.H. (2014). Betting Against Beta. *Journal of Financial Economics*.
+7. Baker, M., Bradley, B., Wurgler, J. (2011). Benchmarks as Limits to Arbitrage: Understanding the Low-Volatility Anomaly. *Financial Analysts Journal*.
+8. Bernard, V.L., Thomas, J.K. (1989). Post-Earnings-Announcement Drift: Delayed Price Response or Risk Premium? *Journal of Accounting Research*.
+
+**Regime detection**
+9. Hamilton, J.D. (1989). A New Approach to the Economic Analysis of Nonstationary Time Series and the Business Cycle. *Econometrica*.
+10. Kritzman, M., Page, S., Turkington, D. (2012). Regime Shifts: Implications for Dynamic Strategies. *Financial Analysts Journal*.
+11. Daniel, K., Moskowitz, T.J. (2016). Momentum Crashes. *Journal of Financial Economics*.
+
+**Statistical methods & research integrity**
+12. Bailey, D.H., López de Prado, M. (2014). The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting, and Non-Normality. *Journal of Portfolio Management*.
+13. Lo, A.W. (2002). The Statistics of Sharpe Ratios. *Financial Analysts Journal*.
+14. Shumway, T. (1997). The Delisting Bias in CRSP Data. *Journal of Finance*.
+15. McLean, R.D., Pontiff, J. (2016). Does Academic Research Destroy Stock Return Predictability? *Journal of Finance*.
+16. Harvey, C.R., Liu, Y., Zhu, H. (2016). ...and the Cross-Section of Expected Returns. *Review of Financial Studies*.
+17. White, H. (2000). A Reality Check for Data Snooping. *Econometrica*.
+18. Efron, B., Tibshirani, R.J. (1993). *An Introduction to the Bootstrap*. Chapman & Hall/CRC.
 
 ---
 
-## License
+## 11. Repository Layout
 
-MIT — research / educational use. Not investment advice.
-Trading involves risk. Past performance does not guarantee future results.
+```
+data_pipeline/     Data ingestion, cleaning, schema, survivorship analysis
+strategy/          Factor library, backtest engine, ML composite, validation framework
+regime/            Market health score, HMM, ML crash alert, regime classification
+automation/        Daily incremental update + LINE/Notion notification
+tests/             101 unit tests (synthetic-data, logic-correctness only)
+reports/           Every real number and figure cited in this document
+docs/              DECISIONS.md (full decision log), PROJECT_STATUS.md (task-by-task detail)
+signals/           Daily paper-trading records (see §9), produced from 2026-09-03 onward
+```
+
+For the complete, chronological record of every research decision, negative
+result, and trade-off discussed in this document — including the reasoning
+behind each one — see [`docs/DECISIONS.md`](docs/DECISIONS.md) and
+[`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md).
