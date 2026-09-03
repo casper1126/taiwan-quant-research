@@ -90,7 +90,7 @@ walk-forward 產出的 `crash_prob`（樣本外預測，沒有任何一筆用到
 
 `regime/regime_engine.py` 的 `classify_regime_raw()` 用
 「`crash_prob < 0.3`」當作 BULL／NEUTRAL 判定條件之一（跟健康分數、
-HMM 的 `p_bear` 一起用 AND 邏輯）。既然 `crash_prob` 本身样本外幾乎
+HMM 的 `p_bear` 一起用 AND 邏輯）。既然 `crash_prob` 本身樣本外幾乎
 不具備方向性資訊，它在這個投票機制裡實質上比較像是「偶爾隨機擋下
 一次分類」，不是真正貢獻獨立判斷力的第三票。
 
@@ -123,6 +123,6 @@ HMM 的 `p_bear` 一起用 AND 邏輯）。既然 `crash_prob` 本身样本外�
   的急跌，換一個完全不同的預警邏輯（例如純粹的技術性風險閾值，不
   假裝是機器學習模型）。
 - 如果之後真的要調整 `classify_regime_raw()` 拿掉或降低 `crash_prob`
-  的權重，需要重新跑一次 Task 3 的完整 8 項驗收，並评估對 Task 4/5/6
+  的權重，需要重新跑一次 Task 3 的完整 8 項驗收，並評估對 Task 4/5/6
   已經記錄的數字有多大影響，這是一次獨立的、需要你決定要不要做的工作，
   不在這次 Task 8 驗收排查的範圍內。
