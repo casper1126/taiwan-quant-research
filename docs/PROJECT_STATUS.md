@@ -127,9 +127,9 @@ Task 1-9 的範圍外，維持獨立、不整合）。Task 3 的 `regime/` 模�
 | 6 | 驗證框架 | **✅ 完成**（Walk-Forward／Ablation A-D／統計顯著性／績效歸因全部真實跑完；3/4 驗收項目通過，1 項延續 Task 4 已知取捨誠實未通過） | 見下方「Task 6 細節」 |
 | 7 | 研究誠信模組 | **✅ 完成**（三份報告/圖全部真實產出；survivorship 含量化估計，且誠實揭露了「無法精確量化」這個發現本身） | 見下方「Task 7 細節」 |
 | 8 | 自動化整合 | **✅ 完成（2026-09-03）**（`daily_update.py`／`notifier.py` 全部重寫，真實全流程手動跑通、dry-run 通知正確產出；驗收前排查出 3 個真實疑點，全部查清楚並處理，其中 1 項導致 `quant_layer2.py` 的因子組成正式修正） | 見下方「Task 8 細節」 |
-| 9 | 文件與發布 | **未開始** | README 現況以 Discord bot 為敘事核心，非作品集規格 |
+| 9 | 文件與發布 | **✅ 完成（2026-09-03）**（`README.md` 全份英文改寫，作品集/研究報告等級；所有數字均可追溯到 `reports/` 或 `docs/DECISIONS.md`；18 篇學術文獻；Limitations 8 項全列） | 見下方「Task 9 細節」 |
 
-**整體完成度：8/9 Task（約 89%）**
+**整體完成度：9/9 Task（100%）**
 
 ### Task 1 細節（資料補完）—— 最新狀態
 
@@ -556,12 +556,51 @@ FinMind 現行清單」判斷下市會被污染 (2) 改用自家資料庫 stalen
    暫不變更 `regime_engine.py` 的分類公式（改公式會讓 Task 3-6 已定案
    的數字全部變成用舊公式算的，代價超過這次排查範圍）。
 
-### Task 9 細節（文件與發布）
+### Task 9 細節（文件與發布）—— ✅ 完成（2026-09-03）
 
-`README.md` 存在，但 Overview 直接寫「live trading via Discord bot」，整份文件是圍繞 Discord bot
-（`/signals /actions /run_model`）敘事的操作手冊，跟 Task 9 要求的「MFE 作品集等級、含 Regime
-方法論 / OOS 表 / Ablation 表 / DSR / Attribution / Limitations / 15+ 篇文獻引用」的學術報告
-格式完全是兩回事，屬於整份重寫（不是修訂）。
+`README.md` 全份重寫（不是修訂）為英文、作品集/研究報告等級，取代原本圍繞 Discord bot
+（`/signals /actions /run_model`）敘事的操作手冊。全新結構：
+
+1. **Overview**——2-3 句設計理念（多因子選股 + 機制偵測風控），不誇大也不隱藏取捨。
+2. **Architecture**——Task 1-8 對照 8 層架構表（每層對應的真實模組與完成狀態）。
+3. **Factor Methodology**——複合裡的 5 個真實因子（momentum/value/rev_yoy/low_vol/div_yld）
+   附真實 IC／ICIR／文獻引用；已測試移除的 3 個因子（mom_120/inst_flow/margin_usage）
+   附真實排查結果，明確標示是研究過程紀錄、不是隱藏失敗。
+4. **Regime Detection**——健康分數 7 個成分權重表、HMM／ML 三方投票 AND 邏輯、
+   遲滯規則、`crash_prob` pooled OOS AUC=0.493 可信度限制的誠實揭露，附
+   `reports/regime_history.png`。
+5. **Performance**——Task 6a Walk-Forward 逐年表、6b Ablation A-D 對照表、6c DSR／
+   Sharpe CI／Bootstrap p-value（含策略顯著跑輸 TAIEX 與台積電集中度後續診斷**並列
+   呈現**，不偏頗）、6d 歸因恆等式分解、Task 5 ML vs 線性版本好壞參半比較。另外把
+   Task 8 驗收前排查出的「92.1%→129.6%→136.5%」三個數字的完整拆解也寫進這裡，
+   明確標示 136.5% 才是目前程式碼真正對應的數字，129.6% 是修正前的真實產出。
+6. **Limitations**（8 項全列，逐一標明真實依據）：存活者偏誤（引 7a）、多重比較/
+   選擇偏誤（8+ 版本、DSR 0.42）、ML 預警可信度限制（引 Task 8 診斷報告）、單一市場、
+   機制規則樣本內設計成分、跑輸大盤的發現（含 6c 後續診斷）、策略容量（引 7c）、
+   paper trading 尚未開始。
+7. **Data Sources**——FinMind 為主、TEJ 金鑰過期的真實情況、`docs/DATA_AVAILABILITY.md`
+   的真實資料起點表。
+8. **Installation & Usage**——`run.py`／`daily_update.py` 指令，dry-run 通知機制說明。
+9. **Paper Trading 條款**——明確寫出從 2026-09-03 起 `signals/*.json` 即為模擬交易紀錄，
+   3 個月後產出 `reports/paper_trading_3m.md`。
+10. **Academic References**——18 篇（超過 15 篇門檻），涵蓋因子研究／機制偵測／統計方法
+    三大類。
+
+**驗收**：README 完成，所有數字均可追溯到 `reports/` 或 `docs/DECISIONS.md` 裡的真實檔案
+（撰寫過程中發現並修正一處自我核對出的數字誤用——見下方「後果」）；`.gitignore` 確認已涵蓋
+`*.db`／`.env`／`__pycache__`／`venv/`／`raw_data/`，未修改；pytest 101/101 全過（純文件
+變更，無回歸）；`git commit` 成功，`git push` 因為這個沙盒環境沒有設定 GitHub 認證
+（`fatal: could not read Username for 'https://github.com'`）而失敗，commit 已在本機
+`main` 分支，需要你之後手動 `git push origin main`。
+
+**過程中發現並修正的一處自我核對錯誤（誠實記錄）**：撰寫 Performance 章節第一版時，
+把 Task 8 驗收前疑點排查（見 `docs/DECISIONS.md`）四格對照表裡「只延伸資料到今天、
+因子還沒修正」那一列（129.6%／8.0%／0.51）誤用成「目前程式碼真正對應的數字」。
+重新核對 `docs/DECISIONS.md` 的四格表後更正：**136.5%／8.3%／0.54** 才是「因子已修正
+＋資料延伸到今天」兩者都做、對應目前程式碼真正會跑出來的數字；129.6% 是修正前
+（`mom_120` 還在複合、`div_yld` 還沒正式納入）那次真實全流程執行的產出，觸發了
+整個疑點排查——README 最終版把兩個數字都列出，並清楚說明各自代表哪個程式碼版本，
+不是挑一個看起來更漂亮的數字用。
 
 ---
 
@@ -861,13 +900,30 @@ margin_trading 階段新增 1866 檔（失敗 0，跳過 229 檔含真無資料�
 配額用盡 → 自動休眠 25 分鐘 → 整點自動恢復，全程無人工介入。最終數字見上方 Task 1 細節，
 三項驗收全部通過。
 
-## 4. 建議的執行起點（2026-09-03 更新：Task 1-8 已完成，這裡是給 Task 9 開始前的提醒）
+## 4. 建議的執行起點（2026-09-03 更新：Task 1-9 全部完成，這裡是給專案維運階段的提醒）
 
-- **Task 1-8 全部完成**，本節以下內容是歷史記錄（Task 1 剛開始時寫的），保留給未來回顧
-  時參考當時的判斷依據。
-- **下一步是 Task 9（文件與發布）**：README.md 整份改寫成英文、作品集等級，需要引用
-  的真實數字散落在很多份報告裡，動工前建議先讀一輪 `docs/DECISIONS.md`（9 筆決定）
-  掌握全部誠實的正面/負面發現，避免只挑好看的數字寫。
+- **Task 1-9 全部完成，專案主體開發工作結束**。`README.md` 已經是英文、研究報告等級的
+  完整文件（見 Task 9 細節），本節以下內容是歷史記錄（Task 1 剛開始時寫的），保留給
+  未來回顧時參考當時的判斷依據。
+- **`git push` 尚未完成**：Task 9 的 README 重寫已經 commit 到本機 `main` 分支，但這個
+  沙盒環境沒有設定 GitHub 認證，`git push origin main` 失敗（遠端本身已經設定好，是
+  `https://github.com/casper1126/taiwan-quant-research.git`）。你需要在有 GitHub 認證的
+  環境手動執行 `git push origin main` 才能讓 GitHub 上的版本同步。
+- **接下來是維運階段，建議的三個優先項目**：
+  1. **3 個月後（約 2026-12-03）產出 `reports/paper_trading_3m.md`**——README 的
+     Paper Trading 條款已經寫明從 2026-09-03 起 `signals/*.json` 就是模擬交易紀錄，
+     屆時把累積的每日訊號實際表現拿來跟回測預期（README §5）對照，檢驗即時訊號
+     產生是否有回測抓不到的落差。
+  2. **重新申請 TEJ 試用或正式金鑰，補強存活者偏誤量化**——目前唯一「無法精確量化」
+     的限制（README Limitations 第 1 項），`data_pipeline/survivorship.py` 已經設計成
+     金鑰可用時可以直接重跑取代目前的文獻估計值，不需要重新開發。
+  3. **視 3 個月 paper trading 結果，評估是否調整機制校準或因子權重**——Task 4/5/6b
+     已經證實機制曝險在史詩級多頭期間會犧牲報酬換取低波動，這是否需要調整（健康
+     分數權重、hysteresis 天數、或乾脆對不同風險偏好提供兩種模式）留給實際 paper
+     trading 資料出來後再決定，不要在還沒有更多樣本外證據前就先改。
+  4. **`LINE_NOTIFY_TOKEN`／`NOTION_TOKEN`／`NOTION_DATABASE_ID` 仍未設定**——Task 8
+     已經用 dry-run 模式完整驗證過整條通知流程，要驗收「真的收到 LINE 通知」需要你
+     之後補上這三個 token。
 - **LINE_NOTIFY_TOKEN／NOTION_TOKEN／NOTION_DATABASE_ID 仍未設定**：Task 8 已經用
   dry-run 模式完整驗證過整條流程（`signals/*_notify_{line,notion}.json` 有真實的
   dry-run 存檔可以檢查格式），要驗收「LINE 真的收到通知」需要你之後補上這三個 token，

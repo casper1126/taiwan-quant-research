@@ -6,6 +6,48 @@
 
 ---
 
+## 2026-09-03 — Task 9：README 全份重寫完成，Task 1-9 全部結束
+
+**狀態：Task 9 驗收通過，專案 9/9 Task 完成**
+
+`README.md` 從圍繞 Discord bot 的操作手冊，全份重寫成英文、研究報告等級的文件
+（Overview／8 層架構對照表／因子方法論／機制偵測方法論／Performance／Limitations
+8 項／Data Sources／Installation／Paper Trading 條款／18 篇學術文獻），依照
+`CLAUDE_CODE_TASKS.md` Task 9 規格逐項核對完成。撰寫依據是重新讀過
+`docs/PROJECT_STATUS.md`／本檔案全部歷史決定，再逐一對照 `reports/` 底下每份
+報告的真實數字，沒有一個數字是憑印象或估計寫的。
+
+**過程中的一次自我核對與更正**：撰寫 Performance 章節時，第一版把 Task 8 驗收前
+疑點排查（見上方「Task 8 驗收前疑點排查」那筆）四格對照表裡「只延伸資料到今天、
+因子還沒修正」那一列（129.6%／8.0%／0.51）誤標成「目前程式碼真正對應的數字」。
+重新核對四格表後更正：**136.5%／8.3%／0.54** 才是「`mom_120`/`div_yld` 因子修正
+＋資料延伸到今天」兩者都做時、真正對應目前程式碼會跑出來的數字；129.6% 是修正前
+（`mom_120` 還在複合、`div_yld` 還沒正式納入）那次真實全流程執行（`signals/2026-08-29.json`）
+的產出，正是這個數字觸發了整個 Task 8 驗收前疑點排查。最終 README 把兩個數字都列出
+並清楚標示各自對應哪個程式碼版本，不是挑一個看起來更漂亮的數字單獨呈現。
+
+**Limitations 章節的呈現原則**：8 項限制逐一列出，其中「策略對市值加權 TAIEX 顯著
+跑輸」與「排除台積電/等權重後不再顯著跑輸」兩個發現**並列呈現**（延續 Task 6c
+後續診斷的決定，不能只挑對策略有利的半句話），ML 崩盤預警可信度限制、存活者偏誤
+無法精確量化、DSR 0.42 不顯著等誠實負面結果全部照實寫，沒有為了讓 README 好看而
+淡化或省略。
+
+**後果**：
+- `README.md` 全份改寫（437 行舊版 Discord bot 手冊 → 新版研究報告格式）
+- `docs/PROJECT_STATUS.md`：完成度總表 Task 9 改成「✅ 完成」，整體完成度
+  8/9→**9/9（100%）**，新增「Task 9 細節」小節
+- `.gitignore` 核對：`*.db`／`.env`／`__pycache__`／`venv/`／`raw_data/` 全部已涵蓋，
+  不需要修改
+- pytest 101/101 全過（純文件變更，無程式碼回歸）
+- `git commit` 成功；**`git push` 失敗**——這個沙盒環境沒有設定 GitHub 認證
+  （`fatal: could not read Username for 'https://github.com'`），commit 已經在本機
+  `main` 分支，需要你之後手動執行 `git push origin main`（遠端 repo 本身已經設定好，
+  是 `https://github.com/casper1126/taiwan-quant-research.git`，不是遠端未設定的問題）
+- **Task 1-9 全部完成**，專案主體工作結束，後續是 §4「建議的執行起點」列出的維運/
+  加強項目（3 個月後 paper trading 檢核、重新申請 TEJ 金鑰、視需要調整機制校準）
+
+---
+
 ## 2026-09-03 — Task 8 驗收前疑點排查（三項，全部查清楚並處理）
 
 **狀態：三項全部排查完成，已修正/已記錄，Task 8 正式驗收通過**
